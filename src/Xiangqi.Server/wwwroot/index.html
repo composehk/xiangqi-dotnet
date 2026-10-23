@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>象棋擂台 Xiangqi Arena</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <span class="seal" aria-hidden="true">棋</span>
+      <div>
+        <h1>象棋擂台</h1>
+        <p>Xiangqi Arena</p>
+      </div>
+    </div>
+    <span id="conn" class="conn">未连接 Offline</span>
+  </header>
+  <main>
+    <section class="board-card">
+      <div id="statusBar" class="status-bar">选择执子颜色和难度。 Choose a color and difficulty.</div>
+      <div class="board-wrap">
+        <svg id="board" role="img" aria-label="象棋棋盘 Xiangqi board"></svg>
+      </div>
+      <form id="newGameForm" class="controls">
+        <label>
+          执子 Color
+          <select id="color">
+            <option value="red">红 Red</option>
+            <option value="black">黑 Black</option>
+          </select>
+        </label>
+        <label>
+          难度 Difficulty
+          <select id="difficulty">
+            <option value="easy">简单 Easy</option>
+            <option value="medium" selected>中等 Medium</option>
+            <option value="hard">困难 Hard</option>
+          </select>
+        </label>
+        <button id="newGame" type="submit">新对局 New Game</button>
+      </form>
+      <p id="message" class="message" aria-live="polite">点击己方棋子，再点高亮的落点。 Click a piece, then a highlighted point.</p>
+    </section>
+    <aside class="lobby">
+      <div class="lobby-head">
+        <h2>擂台 Lobby</h2>
+        <button id="refresh" type="button" class="secondary">刷新 Refresh</button>
+      </div>
+      <ul id="roomList"></ul>
+    </aside>
+  </main>
+  <noscript>需要启用 JavaScript。 JavaScript is required to play.</noscript>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/8.0.7/signalr.min.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
