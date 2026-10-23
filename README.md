@@ -1,2 +1,334 @@
-# xiangqi-dotnet
-Online human-vs-AI Chinese chess (Xiangqi) in C#/.NET 8: rules engine, alpha-beta AI, ASP.NET Core + SignalR arena, web UI
+# 象棋擂台 Xiangqi Arena
+
+进程内中国象棋规则、alpha-beta 引擎，以及带棋盘页面的对局服务器。房间保存在内存里，进程退出后清空。
+
+In-process Xiangqi rules, an alpha-beta engine, and a game server with a board page. Rooms stay in memory and disappear when the process exits.
+
+服务器默认监听 `http://0.0.0.0:5080`。本机浏览或 curl 用 `http://127.0.0.1:5080`。
+
+The server listens on `http://0.0.0.0:5080`. Browse and curl it at `http://127.0.0.1:5080`.
+
+## 功能 Features
+
+- 规则引擎：将帅、仕士、相象、马、车、炮、兵卒，整将、宫心、塞象眼、马腿、炮架。困毙与将死都判负。同一局面（棋子与行棋方）三次重复，或 120 步无吃子，判和。
+- Rules for generals, advisors, elephants, horses, chariots, cannons, and soldiers, including flying generals, palace, elephant-eye, horse-leg, and cannon-screen. Stalemate and checkmate both lose. The same piece placement and side to move repeated three times is a draw, as are 120 plies with no capture.
+- 内置 `AlphaBetaEngine`：`easy` 深度 2，`medium` 深度 4，`hard` 深度 6 且最多约 5 秒。
+- Builtin `AlphaBetaEngine`: `easy` depth 2, `medium` depth 4, `hard` depth 6 with about a 5 second cap.
+- 擂台：多房间。座位可以是人、内置 AI，或持令牌的外部 Bot。轮到 AI 时，服务器在后台搜索并落子，再向该房间的 SignalR 组广播 `state`。
+- Arena of rooms. A seat is a human, the builtin AI, or a token-authenticated external bot. On an AI turn the server searches in the background, plays the move, and broadcasts `state` to that room's SignalR group.
+- 网页棋盘：楚河汉界、九宫斜线、红方 帥仕相傌俥炮兵、黑方 將士象馬車砲卒。点击走子、合法点高亮、上一着高亮、将军与终局提示。可新开人机对局，也可刷新擂台列表后观战。
+- Web board: river (楚河 汉界), palace diagonals, red 帥仕相傌俥炮兵 and black 將士象馬車砲卒. Click to move, legal-move dots, last-move highlight, check and game-over messages. Start a game against the AI, or refresh the lobby and spectate.
+
+## 架构 Architecture
+
+```
+Browser / external bot
+    |  REST JSON (camelCase)          SignalR /hub/game  event "state"
+    v                                 ^
+Xiangqi.Server  ArenaService  -------+
+    |  ConcurrentDictionary + per-room lock
+    |  AI turn -> AlphaBetaEngine (IEngine) on a background task
+    v
+Xiangqi.Core   Board, Move, Game
+Xiangqi.Engine IEngine, AlphaBetaEngine, UciEngine (Pikafish-shaped, not spawned)
+```
+
+| 项目 Project | 职责 Role |
+| --- | --- |
+| `src/Xiangqi.Core` | 棋盘、走法、对局状态与和棋/胜负。Board, moves, game status. |
+| `src/Xiangqi.Engine` | `IEngine`、`AlphaBetaEngine`、面向 Pikafish 的 `UciEngine`。 |
+| `src/Xiangqi.Server` | 擂台、REST、SignalR、`wwwroot` 页面。Arena, REST, SignalR, static UI. |
+| `tests/Xiangqi.Tests` | 规则、perft、引擎，以及 API 冒烟测试。Rules, perft, engine, API smoke tests. |
+
+走法记谱从红方视角：文件 `a`–`i` 从左到右，横线 `0`–`9` 从红方底线数起。`h2e2` 是红炮平五。棋盘数组 `board[0]` 是上方（黑方底线，横线 9），`board[9]` 是红方底线。格子是 FEN 字母，空格为 `""`。
+
+Move text is from Red's point of view: files `a`–`i` left to right, ranks `0`–`9` up from Red's back rank. `h2e2` slides the red cannon on h2 to e2. `board[0]` is the top rank (Black's back rank, rank 9) and `board[9]` is Red's back rank. Cells are FEN letters, or `""` when empty.
+
+| FEN | 红 Red | 黑 Black | 棋子 Piece |
+| --- | --- | --- | --- |
+| `K` / `k` | 帥 | 將 | 将 General |
+| `A` / `a` | 仕 | 士 | 士 Advisor |
+| `B` / `b` | 相 | 象 | 象 Elephant |
+| `N` / `n` | 傌 | 馬 | 马 Horse |
+| `R` / `r` | 俥 | 車 | 车 Chariot |
+| `C` / `c` | 炮 | 砲 | 炮 Cannon |
+| `P` / `p` | 兵 | 卒 | 兵 Soldier |
+
+## 运行 Run
+
+```bash
+dotnet run --project src/Xiangqi.Server
+```
+
+打开 Open `http://127.0.0.1:5080`.
+
+`dotnet run` 使用 `src/Xiangqi.Server/Properties/launchSettings.json` 里的 `http://0.0.0.0:5080`。直接运行 dll 且没有设置 `ASPNETCORE_URLS` / `ASPNETCORE_HTTP_PORTS` 时，程序同样监听该地址。
+
+`dotnet run` uses `http://0.0.0.0:5080` from `launchSettings.json`. Running the dll with neither `ASPNETCORE_URLS` nor `ASPNETCORE_HTTP_PORTS` listens on that address too.
+
+页面用 CDN 上的 SignalR 客户端。脚本加载失败时改为每秒轮询 `GET /api/rooms/{id}`。
+
+The page loads the SignalR client from a CDN. If that script fails, it polls `GET /api/rooms/{id}` once a second.
+
+## 测试 Test
+
+```bash
+dotnet test
+```
+
+冒烟测试会创建人机局（`easy`），读取合法着法，走一步，等待内置引擎应答，再确认非法着法返回 400。
+
+The smoke test creates an easy vs-AI game, reads legal moves, plays one, waits for the builtin engine, and checks that an illegal move returns 400.
+
+## Docker
+
+```bash
+docker build -t xiangqi .
+docker run --rm -p 5080:5080 xiangqi
+```
+
+多阶段镜像：`sdk:8.0` 编译，`aspnet:8.0` 运行，暴露 5080。镜像里的默认 8080 端口已清空，改为 `ASPNETCORE_URLS=http://0.0.0.0:5080`。
+
+Multi-stage image: build with `sdk:8.0`, run with `aspnet:8.0`, expose 5080. The image's default port 8080 is cleared in favor of `ASPNETCORE_URLS=http://0.0.0.0:5080`.
+
+## CI
+
+`.github/workflows/ci.yml` 在 `ubuntu-latest` 上安装 .NET `8.0.x`，然后 `dotnet restore`、`dotnet build`、`dotnet test`。
+
+`.github/workflows/ci.yml` runs on `ubuntu-latest`, installs the .NET `8.0.x` SDK, then restores, builds, and tests the solution.
+
+## HTTP API
+
+JSON，属性名 camelCase。错误体为 `{ "error": "..." }`。
+
+JSON, camelCase property names. Errors are `{ "error": "..." }`.
+
+| 状态 Status | 含义 Meaning |
+| --- | --- |
+| 400 | 请求不合法、着法格式错误、非法着法，或对局已结束。Bad body, bad move text, illegal move, or the game is over. |
+| 403 | 令牌不是行棋方。The token does not own the side to move. |
+| 404 | 没有这个房间。Unknown room. |
+| 409 | 座位已被占用。Seat is taken. |
+
+座位种类 Seat kinds：`human`、`ai`（别名 alias `builtin`、`builtinAi`）、`bot`（别名 `external`、`externalBot`）。创建房间时还可以用 `open`（别名 `empty`、`none`）留出空位。加入时 `kind` 只能是 `human` 或 `bot`。难度 `easy`、`medium`、`hard`，省略时为 `medium`。
+
+`open` (aliases `empty`, `none`) leaves a seat empty on create. Join accepts only `human` or `bot`. Difficulty defaults to `medium`.
+
+人与 Bot 座位会得到令牌。AI 与空位没有令牌。令牌是不透明字符串，请当作秘密保存；`GET` 不会再次返回。
+
+Human and bot seats receive a token. AI and open seats do not. Tokens are opaque secrets and are not returned again by `GET`.
+
+### `GET /api/health`
+
+```bash
+curl -s http://127.0.0.1:5080/api/health
+```
+
+```json
+{ "status": "ok" }
+```
+
+### `POST /api/rooms`
+
+创建房间。响应包含房间、当前局面，以及人/Bot 座位的令牌。
+
+Creates a room. The response has the room, the position, and tokens for human and bot seats.
+
+```bash
+curl -s http://127.0.0.1:5080/api/rooms \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"友谊赛","redKind":"human","blackKind":"bot","difficulty":"medium"}'
+```
+
+```json
+{
+  "id": "7d1c0c3e-1b4a-4e0a-9c2e-6f0a9b1c2d3e",
+  "name": "友谊赛",
+  "tokens": { "red": "a1b2…", "black": "c3d4…" },
+  "state": { }
+}
+```
+
+`name` 可省略，服务器会生成 `擂台` 加短 id。两个座位都可以是 `ai`，开局后红方 AI 会自动走子。
+
+`name` is optional (`擂台` plus a short id). Both seats may be `ai`; Red's AI then moves on its own.
+
+### `POST /api/games/vs-ai`
+
+人机快捷入口。`humanColor` 为 `red` 或 `black`。另一方是内置 AI。若人执黑，红方 AI 会立刻在后台走第一步。
+
+Convenience vs-AI game. `humanColor` is `red` or `black`. The other seat is the builtin AI. If the human takes Black, Red's AI starts thinking immediately.
+
+```bash
+curl -s http://127.0.0.1:5080/api/games/vs-ai \
+  -H 'Content-Type: application/json' \
+  -d '{"humanColor":"red","difficulty":"easy"}'
+```
+
+```json
+{ "roomId": "7d1c…", "token": "a1b2…", "state": { } }
+```
+
+### `GET /api/rooms`
+
+擂台列表。Lobby / arena list.
+
+```bash
+curl -s http://127.0.0.1:5080/api/rooms
+```
+
+```json
+[
+  {
+    "id": "7d1c…",
+    "name": "人机 · 执红 · 简单",
+    "status": "ongoing",
+    "sideToMove": "red",
+    "moveCount": 0,
+    "seats": {
+      "red": { "kind": "human", "occupied": true, "difficulty": null },
+      "black": { "kind": "ai", "occupied": true, "difficulty": "easy" }
+    }
+  }
+]
+```
+
+`status`：`ongoing`、`redWins`、`blackWins`、`draw`。
+
+### `GET /api/rooms/{id}`
+
+完整局面。Full state.
+
+```bash
+curl -s http://127.0.0.1:5080/api/rooms/7d1c0c3e-1b4a-4e0a-9c2e-6f0a9b1c2d3e
+```
+
+```json
+{
+  "id": "7d1c…",
+  "name": "人机 · 执红 · 简单",
+  "fen": "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1",
+  "board": [
+    ["r", "n", "b", "a", "k", "a", "b", "n", "r"],
+    ["", "", "", "", "", "", "", "", ""],
+    ["", "c", "", "", "", "", "", "c", ""],
+    ["p", "", "p", "", "p", "", "p", "", "p"],
+    ["", "", "", "", "", "", "", "", ""],
+    ["", "", "", "", "", "", "", "", ""],
+    ["P", "", "P", "", "P", "", "P", "", "P"],
+    ["", "C", "", "", "", "", "", "C", ""],
+    ["", "", "", "", "", "", "", "", ""],
+    ["R", "N", "B", "A", "K", "A", "B", "N", "R"]
+  ],
+  "sideToMove": "red",
+  "status": "ongoing",
+  "inCheck": false,
+  "lastMove": null,
+  "history": [],
+  "seats": {
+    "red": { "kind": "human", "occupied": true, "difficulty": null },
+    "black": { "kind": "ai", "occupied": true, "difficulty": "easy" }
+  }
+}
+```
+
+`inCheck` 表示行棋方是否被将军。`history` 与 `lastMove` 使用 `h2e2` 这种记谱。
+
+`inCheck` is whether the side to move is in check. `history` and `lastMove` use notation such as `h2e2`.
+
+### `GET /api/rooms/{id}/moves`
+
+当前合法着法。对局结束时为空数组。
+
+Legal moves for the side to move. An empty array when the game is over.
+
+```bash
+curl -s http://127.0.0.1:5080/api/rooms/7d1c0c3e-1b4a-4e0a-9c2e-6f0a9b1c2d3e/moves
+```
+
+```json
+["a0a1", "a3a4", "b0a2", "b2e2", "h2e2"]
+```
+
+实际顺序以生成器为准。The generator's order is the order you get.
+
+### `POST /api/rooms/{id}/moves`
+
+令牌必须属于当前行棋方。成功时返回走子之后的局面（AI 的应着随后经 SignalR 或下一次 `GET` 出现）。
+
+The token must belong to the side to move. Success returns the position after this move. An AI reply follows on SignalR, or on the next `GET`.
+
+```bash
+curl -s http://127.0.0.1:5080/api/rooms/7d1c0c3e-1b4a-4e0a-9c2e-6f0a9b1c2d3e/moves \
+  -H 'Content-Type: application/json' \
+  -d '{"move":"h2e2","token":"a1b2c3d4e5f64789a0b1c2d3e4f56789"}'
+```
+
+非法着法：
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' \
+  http://127.0.0.1:5080/api/rooms/7d1c0c3e-1b4a-4e0a-9c2e-6f0a9b1c2d3e/moves \
+  -H 'Content-Type: application/json' \
+  -d '{"move":"a0a0","token":"YOUR_TOKEN"}'
+```
+
+打印 `400`。Prints `400`.
+
+### `POST /api/rooms/{id}/join`
+
+空座位加入为 `human` 或 `bot`，返回新令牌。
+
+Take an open seat as `human` or `bot` and receive a token.
+
+```bash
+curl -s http://127.0.0.1:5080/api/rooms/7d1c0c3e-1b4a-4e0a-9c2e-6f0a9b1c2d3e/join \
+  -H 'Content-Type: application/json' \
+  -d '{"color":"black","kind":"bot"}'
+```
+
+```json
+{ "token": "c3d4…", "color": "black", "state": { } }
+```
+
+## 外部 Bot 协议 External bot protocol
+
+1. 创建带 `bot` 座位的房间，或对空位 `POST /join`，`kind` 为 `bot`。保存返回的令牌，它只代表那一方。
+   Create a room with a `bot` seat, or `POST /join` an open seat with `kind` `bot`. Keep the token. It authorizes only that seat.
+2. 连接 SignalR `/hub/game`，调用 `JoinRoom(roomId)`，监听事件 `state`。事件体与 `GET /api/rooms/{id}` 相同。打不开 SignalR 时轮询该 GET。
+   Connect to the SignalR hub at `/hub/game`, invoke `JoinRoom(roomId)`, and listen for `state`. The payload matches `GET /api/rooms/{id}`. Poll that GET if the hub is unreachable.
+3. 当 `status` 为 `ongoing` 且 `sideToMove` 是你的颜色时，`GET .../moves`，选一个着法，再 `POST .../moves`，body 为 `{ "move": "h2e2", "token": "..." }`。
+   When `status` is `ongoing` and `sideToMove` is your color, `GET .../moves`, choose one, and `POST .../moves` with `{ "move": "h2e2", "token": "..." }`.
+4. `400` 表示着法非法或对局已结束，`403` 表示还没轮到这个令牌，`404` 表示房间不存在。不要替 `ai` 座位走子，服务器会自己走。
+   `400` means illegal or the game is over, `403` means it is not this token's turn, `404` means the room is gone. Do not move for an `ai` seat; the server plays those turns.
+
+浏览器里的跨源调用已放开 CORS（任意 Origin，无凭据）。令牌放在 JSON 里，不要放在 URL 上。
+
+Cross-origin browser calls are allowed (any origin, no credentials). Send the token in JSON, not in the URL.
+
+```javascript
+const connection = new signalR.HubConnectionBuilder()
+  .withUrl("http://127.0.0.1:5080/hub/game")
+  .withAutomaticReconnect()
+  .build();
+connection.on("state", (state) => console.log(state.fen, state.sideToMove));
+await connection.start();
+await connection.invoke("JoinRoom", roomId);
+```
+
+## IEngine 与 Pikafish 计划 IEngine and Pikafish
+
+`Xiangqi.Engine.IEngine` 是唯一的搜索入口：
+
+`Xiangqi.Engine.IEngine` is the only search entry point:
+
+```csharp
+Task<EngineResult> SearchAsync(Board board, SearchLimits limits, CancellationToken cancellationToken);
+```
+
+- 今天，座位 `ai` 固定使用进程内的 `AlphaBetaEngine`。`ArenaService` 在房间锁之外克隆棋盘并调用 `SearchAsync`，回到锁内确认仍是该方行棋且着法合法，然后 `Game.MakeMove`，再广播 `state`。难度来自 `SearchLimits.For(Difficulty)`。
+- Today an `ai` seat always uses the in-process `AlphaBetaEngine`. `ArenaService` clones the board outside the room lock, calls `SearchAsync`, then under the lock checks that it is still that side's turn and the move is legal, calls `Game.MakeMove`, and broadcasts `state`. Difficulty comes from `SearchLimits.For`.
+- `UciEngine` 已经按 Pikafish 的 UCI 写好：启动进程，`uci` / `uciok`，`isready` / `readyok`，`position fen`，`go depth` 与 `go movetime`，解析 `bestmove`。它实现同一个 `IEngine`，所以换成强引擎不必改 REST 或 `state` 事件。
+- `UciEngine` already speaks the UCI subset Pikafish uses: spawn the process, `uci` / `uciok`, `isready` / `readyok`, `position fen`, `go depth` and `go movetime`, parse `bestmove`. It is an `IEngine`, so a stronger engine does not change REST or the `state` event.
+- 下一步：增加配置 `Engines:Pikafish:Path`（以及可选参数）。`ArenaService` 按房间选择 `UciEngine` 或 `AlphaBetaEngine`。每个 UCI 进程同时只能有一路搜索，因此用每房间一个进程，或一个小进程池，并在房间关闭时 `Dispose`。服务器现在不启动 Pikafish，部署也不依赖那个二进制文件。
+- Next: configuration `Engines:Pikafish:Path` plus optional arguments. `ArenaService` picks `UciEngine` or `AlphaBetaEngine` per room. One UCI process searches one position at a time, so use one process per room or a small pool, and `Dispose` it when the room goes away. The server does not launch Pikafish today and does not need that binary to build or run.
