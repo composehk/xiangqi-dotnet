@@ -4,6 +4,13 @@
     <TargetFramework>net8.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <!--
+      Workstation GC, non-concurrent: written to runtimeconfig.json and honored by IIS in-process.
+      Lowers memory use on small hosts. Cap the heap per environment with DOTNET_GCHeapHardLimit
+      or runtimeconfig System.GC.HeapHardLimit; do not set a limit in this project.
+    -->
+    <ServerGarbageCollector>false</ServerGarbageCollector>
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
   </PropertyGroup>
 
   <ItemGroup>

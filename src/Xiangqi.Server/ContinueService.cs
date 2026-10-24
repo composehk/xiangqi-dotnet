@@ -52,6 +52,8 @@ public sealed class ContinueService
     private readonly ConcurrentDictionary<string, long> _lastLookup = new();
     private readonly ILogger<ContinueService> _logger;
     private readonly TimeProvider _time;
+    /// <summary>UTC ticks of the last opportunistic cache sweep. 0 means one has not run yet.</summary>
+    private long _lastCleanupTicks;
 
     public ContinueService(ContinueStore store, IPaymentVerifier verifier, PaymentOptions options, ILogger<ContinueService> logger,
         TimeProvider? time = null)
@@ -129,7 +131,9 @@ public sealed class ContinueService
             UpdatedAt = now,
         };
         _store.Insert(s);
-        return Project(s, includeToken: true);
+        var created = Project(s, includeToken: true);
+        CleanupIfDue();
+        return created;
     }
 
     public ContinueSessionDto Get(string id) => Project(Load(id));
@@ -234,6 +238,7 @@ public sealed class ContinueService
         finally
         {
             gate.Release();
+            CleanupIfDue();
         }
     }
 
@@ -324,6 +329,70 @@ public sealed class ContinueService
     private bool IsExpired(ContinueSession s) =>
         s.Status is "pending_auth" or "pending_payment"
         && _time.GetUtcNow().ToUnixTimeSeconds() - s.CreatedAt > _options.SessionTtlMinutes * 60L;
+
+    /// <summary>
+    /// True when an unpaid session is past both the TTL and the payment grace window.
+    /// Inside the grace window a signed pending_payment session may still submit a txid.
+    /// </summary>
+    private bool IsBeyondPaymentGrace(ContinueSession s)
+    {
+        if (!IsExpired(s))
+            return false;
+        long age = _time.GetUtcNow().ToUnixTimeSeconds() - s.CreatedAt;
+        long limit = ((long)_options.SessionTtlMinutes + _options.ExpiredPaymentGraceMinutes) * 60L;
+        return age > limit;
+    }
+
+    /// <summary>At most one sweep per 60 seconds, driven by <see cref="TimeProvider"/>.</summary>
+    private void CleanupIfDue()
+    {
+        long now = _time.GetUtcNow().UtcTicks;
+        long prev = Interlocked.Read(ref _lastCleanupTicks);
+        if (prev != 0 && now - prev < TimeSpan.FromSeconds(60).Ticks)
+            return;
+        if (Interlocked.CompareExchange(ref _lastCleanupTicks, now, prev) != prev)
+            return;
+        CleanupCaches();
+    }
+
+    /// <summary>
+    /// Drops cache entries that can no longer be used. A lock is removed only when it is free
+    /// (CurrentCount == 1) and the session is gone, finished, or past the payment grace window.
+    /// Lookup timestamps older than 10× the per-session payment interval are removed regardless of status.
+    /// Returns how many dictionary entries were removed. A lock held by the caller (for example while
+    /// status becomes finished) is left for a later sweep.
+    /// </summary>
+    public int CleanupCaches()
+    {
+        int removed = 0;
+        foreach (var kv in _locks)
+        {
+            SemaphoreSlim gate = kv.Value;
+            // Held locks stay. Checking before TryRemove accepts a tiny race; do not put an entry back.
+            if (gate.CurrentCount != 1)
+                continue;
+            ContinueSession? session = IsSessionId(kv.Key) ? _store.Get(kv.Key) : null;
+            if (session is not null && session.Status != "finished" && !IsBeyondPaymentGrace(session))
+                continue;
+            if (gate.CurrentCount != 1)
+                continue;
+            if (_locks.TryRemove(new KeyValuePair<string, SemaphoreSlim>(kv.Key, gate)))
+            {
+                removed++;
+                if (gate.CurrentCount == 1)
+                    gate.Dispose();
+            }
+        }
+
+        long nowTicks = Environment.TickCount64;
+        long maxAgeMs = 10L * _options.PaymentMinIntervalSeconds * 1000L;
+        foreach (var kv in _lastLookup)
+        {
+            if (nowTicks - kv.Value > maxAgeMs && _lastLookup.TryRemove(kv.Key, out _))
+                removed++;
+        }
+        return removed;
+    }
 
     private void RequireNotExpired(ContinueSession s)
     {
