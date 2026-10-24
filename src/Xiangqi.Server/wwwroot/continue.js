@@ -10,6 +10,24 @@
   let pendingTx = null;   // last broadcast txid awaiting confirmation
   const STORE = "xiangqi-continue";
   const HEX64 = /^[0-9a-fA-F]{64}$/;
+  const TOO_MANY = "请求过于频繁，请稍后再试 Too many requests, slow down";
+
+  async function postJsonEx(url, body) {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    const raw = await response.text();
+    let data = null;
+    if (raw) {
+      try { data = JSON.parse(raw); }
+      catch { data = { error: raw }; }
+    }
+    const header = response.headers.get("Retry-After");
+    const parsed = header == null || header === "" ? NaN : Number(header);
+    return { ok: response.ok, status: response.status, data: data, retryAfter: Number.isFinite(parsed) ? parsed : null };
+  }
 
   function fenRows(fen) {
     const rows = fen.split(" ")[0].split("/");
@@ -92,10 +110,11 @@
 
   async function create() {
     if (!replay) { info("请先载入棋谱或 FEN。 Load a record first.", "error"); return; }
-    const res = await postJson("/api/continue/sessions", {
+    const res = await postJsonEx("/api/continue/sessions", {
       fen: replay.startFen, moves: replay.iccs.join(" "), ply: ply,
       difficulty: $("contDifficulty").value, humanColor: $("contColor").value
     });
+    if (res.status === 429) { info((res.data && res.data.error) || TOO_MANY, "error"); return; }
     if (!res.ok) { info((res.data && res.data.error) || "创建失败。", "error"); return; }
     await adopt(res.data, res.data.token);
     info("续弈会话已创建，请签名并支付续弈服务费（1 KAS）。", "");
@@ -109,35 +128,43 @@
     $("payTo").textContent = cs.payToAddress || "未配置收款地址";
     $("payStatus").textContent = ({ pending_auth: "① 待签名 Sign", pending_payment: "② 待支付 Pay", active: "已激活 Active", finished: "已结束 Finished", expired: "已过期 Expired" })[cs.status] || cs.status;
     $("authFields").hidden = cs.status !== "pending_auth";
-    $("txFields").hidden = cs.status !== "pending_payment";
+    const expiredPayable = cs.status === "expired" && cs.address;
+    $("txFields").hidden = cs.status !== "pending_payment" && !expiredPayable;
     $("kasBtn").textContent = cs.status === "pending_auth" ? "KasWare 连接并签名" : "KasWare 支付 1 KAS";
   }
 
   async function auth(address, signature) {
-    const res = await postJson("/api/continue/sessions/" + cs.id + "/auth",
+    const res = await postJsonEx("/api/continue/sessions/" + cs.id + "/auth",
       { token: cs.token, address: address, signature: signature, timestamp: cs.timestamp });
+    if (res.status === 429) { info((res.data && res.data.error) || TOO_MANY, "error"); return false; }
     if (!res.ok) { info((res.data && res.data.error) || "签名验证失败。", "error"); return false; }
     await adopt(res.data);
     info("签名已验证，地址 " + address + "。请支付 1 KAS 续弈服务费。", "");
     return true;
   }
 
-  function retryPay(txid) {
+  function retryPay(txid, delayMs) {
     clearTimeout(pollTimer);
-    pollTimer = setTimeout(function () { void pay(txid); }, 5000);
+    pollTimer = setTimeout(function () { void pay(txid); }, delayMs == null ? 5000 : delayMs);
   }
 
   async function pay(txid) {
     setPendingTx(txid);
     let res;
     try {
-      res = await postJson("/api/continue/sessions/" + cs.id + "/payment", { token: cs.token, txid: txid });
+      res = await postJsonEx("/api/continue/sessions/" + cs.id + "/payment", { token: cs.token, txid: txid });
     } catch (err) {
       info("网络异常，5 秒后重试支付确认… Network error, retrying payment check…", "");
       retryPay(txid);
       return;
     }
-    if (res.status === 202 || res.status === 429 || res.status >= 500) {
+    if (res.status === 429) {
+      const wait = Math.max(5, Number.isFinite(res.retryAfter) ? res.retryAfter : 0);
+      info((res.data && res.data.error) || TOO_MANY, "error");
+      retryPay(txid, wait * 1000);
+      return;
+    }
+    if (res.status === 202 || res.status >= 500) {
       info((res.data && res.data.info) || "交易确认中，稍后自动重试… Waiting for confirmations…", "");
       retryPay(txid);
       return;
@@ -148,7 +175,11 @@
       info("续弈服务费已确认，开始对局！ Paid — your move.", "");
       return;
     }
-    if (res.status === 400 || res.status === 403 || res.status === 404 || res.status === 409 || res.status === 410 || res.status === 413) {
+    if (res.status === 410) {
+      info("会话已过期。如果您已经转账，请保留此交易 ID 并联系客服恢复：" + txid + " ／ Session expired. If you already paid, keep this txid and contact support: " + txid, "error");
+      return;
+    }
+    if (res.status === 400 || res.status === 403 || res.status === 404 || res.status === 409 || res.status === 413) {
       clearPendingTx();
     }
     info((res.data && res.data.error) || "支付验证失败。", "error");
