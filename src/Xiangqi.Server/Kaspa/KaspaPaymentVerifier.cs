@@ -97,7 +97,10 @@ public sealed class KaspaPaymentVerifier : IPaymentVerifier
             if (resp.StatusCode == HttpStatusCode.NotFound)
                 return PaymentCheck.Wait("交易尚未被索引，请稍后重试 / transaction not found yet", 0, 0);
             if (!resp.IsSuccessStatusCode)
-                return PaymentCheck.Wait($"Kaspa API 暂不可用 ({(int)resp.StatusCode})", 0, 0);
+            {
+                int code = (int)resp.StatusCode;
+                return PaymentCheck.Wait($"Kaspa API 暂不可用 ({code}) / Kaspa API unavailable ({code})", 0, 0);
+            }
             using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
             if (doc.RootElement.ValueKind != JsonValueKind.Object)
                 return PaymentCheck.Wait("Kaspa API 返回了无法解析的数据 / malformed Kaspa API response", 0, 0);
@@ -155,13 +158,14 @@ public sealed class KaspaPaymentVerifier : IPaymentVerifier
         using (var resp = await _http.GetAsync($"{baseUrl}/info/virtual-chain-blue-score", ct))
         {
             if (!resp.IsSuccessStatusCode)
-                return PaymentCheck.Wait("无法获取当前 blue score", paid, 0);
+                return PaymentCheck.Wait("无法获取当前 blue score / cannot fetch the current blue score", paid, 0);
             using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
             virtualScore = doc.RootElement.ValueKind == JsonValueKind.Object ? Long(doc.RootElement, "blueScore") : 0;
         }
         long conf = Math.Max(0, virtualScore - acceptingScore);
-        if (conf < Math.Max(1, _options.MinConfirmations))
-            return PaymentCheck.Wait($"确认数不足：{conf}/{_options.MinConfirmations}", paid, conf);
+        int min = Math.Max(1, _options.MinConfirmations);
+        if (conf < min)
+            return PaymentCheck.Wait($"等待确认 {conf}/{min} / waiting for confirmations {conf}/{min}", paid, conf);
 
         return new PaymentCheck(true, false, null, paid, conf, inputs.ToArray());
     }
