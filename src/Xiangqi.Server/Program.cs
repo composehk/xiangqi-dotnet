@@ -71,10 +71,13 @@ builder.Services.AddSignalR();
 // use ArenaOptions (0 or less disables that partition). Reads are not limited.
 builder.Services.AddRateLimiter(o =>
 {
+    // One window length for every fixed-window partition and for the Retry-After fallback.
+    TimeSpan rateWindow = TimeSpan.FromMinutes(1);
+    int rateWindowSeconds = (int)rateWindow.TotalSeconds;
     o.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
     o.OnRejected = async (context, ct) =>
     {
-        int retryAfter = 60;
+        int retryAfter = rateWindowSeconds;
         if (context.Lease.TryGetMetadata(MetadataName.RetryAfter, out TimeSpan wait))
             retryAfter = Math.Clamp((int)Math.Ceiling(wait.TotalSeconds), 1, 3600);
         context.HttpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
@@ -96,7 +99,7 @@ builder.Services.AddRateLimiter(o =>
             return RateLimitPartition.GetFixedWindowLimiter($"{(create ? "c" : "a")}:{ip}", _ => new FixedWindowRateLimiterOptions
             {
                 PermitLimit = permits,
-                Window = TimeSpan.FromMinutes(1),
+                Window = rateWindow,
                 QueueLimit = 0,
                 AutoReplenishment = true,
             });
@@ -123,7 +126,7 @@ builder.Services.AddRateLimiter(o =>
                 return RateLimitPartition.GetFixedWindowLimiter($"{(createRoom ? "rc" : "ra")}:{ip}", _ => new FixedWindowRateLimiterOptions
                 {
                     PermitLimit = permits,
-                    Window = TimeSpan.FromMinutes(1),
+                    Window = rateWindow,
                     QueueLimit = 0,
                     AutoReplenishment = true,
                 });
@@ -267,8 +270,55 @@ app.Use(async (ctx, next) =>
     await next();
 });
 app.UseRateLimiter();
+
+// Invalid room ids never match {id:guid}, so routing would otherwise answer 404 with an empty body.
+// A well-formed but unknown id still falls through and returns the service's bilingual 404.
+app.Use(async (ctx, next) =>
+{
+    const string roomsPrefix = "/api/rooms/";
+    string path = ctx.Request.Path.Value ?? "";
+    if (path.StartsWith(roomsPrefix, StringComparison.OrdinalIgnoreCase))
+    {
+        string rest = path[roomsPrefix.Length..];
+        int slash = rest.IndexOf('/');
+        string segment = slash >= 0 ? rest[..slash] : rest;
+        if (segment.Length > 0 && !Guid.TryParse(segment, out _))
+        {
+            ctx.Response.StatusCode = StatusCodes.Status400BadRequest;
+            await ctx.Response.WriteAsJsonAsync(new ErrorDto("房间编号无效 / Invalid room id."));
+            return;
+        }
+    }
+
+    try
+    {
+        await next();
+    }
+    catch (BadHttpRequestException) when (!ctx.Response.HasStarted && ctx.Request.Path.StartsWithSegments("/api"))
+    {
+        // Development throws the binding failure instead of answering 400; keep both environments uniform
+        // and never echo parser internals back to the client.
+        ctx.Response.Clear();
+        ctx.Response.StatusCode = StatusCodes.Status400BadRequest;
+        await ctx.Response.WriteAsJsonAsync(new ErrorDto("请求格式无效 / Malformed request body."));
+        return;
+    }
+
+    // Minimal APIs answer malformed JSON / bad content type with 400 or 415 and an empty body.
+    // Leave any response that already wrote JSON (or anything else) untouched.
+    if (!ctx.Request.Path.StartsWithSegments("/api"))
+        return;
+    if (ctx.Response.StatusCode is not (StatusCodes.Status400BadRequest or StatusCodes.Status415UnsupportedMediaType))
+        return;
+    if (ctx.Response.HasStarted
+        || ctx.Response.ContentLength is not null
+        || !string.IsNullOrEmpty(ctx.Response.ContentType))
+        return;
+    await ctx.Response.WriteAsJsonAsync(new ErrorDto("请求格式无效 / Malformed request body."));
+});
+
 app.UseDefaultFiles();
-app.MapGet("/favicon.ico", (HttpContext ctx) =>
+app.MapMethods("/favicon.ico", new[] { HttpMethods.Get, HttpMethods.Head }, (HttpContext ctx) =>
 {
     ctx.Response.Headers.CacheControl = "public, max-age=86400";
     return Results.File(FaviconIco.Bytes, "image/x-icon");

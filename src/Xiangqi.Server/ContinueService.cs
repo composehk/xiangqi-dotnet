@@ -106,12 +106,12 @@ public sealed class ContinueService
 
         string difficulty = (request?.Difficulty ?? "medium").Trim().ToLowerInvariant();
         if (difficulty is not ("easy" or "medium" or "hard"))
-            throw new ApiException(400, "Difficulty must be easy, medium, or hard.");
+            throw new ApiException(400, "难度必须是 easy、medium 或 hard / Difficulty must be easy, medium, or hard.");
         string color = string.IsNullOrWhiteSpace(request?.HumanColor)
             ? (probe.SideToMove == Color.Red ? "red" : "black")
             : request!.HumanColor!.Trim().ToLowerInvariant();
         if (color is not ("red" or "black"))
-            throw new ApiException(400, "humanColor must be red or black.");
+            throw new ApiException(400, "humanColor 必须是 red 或 black / humanColor must be red or black.");
 
         long now = _time.GetUtcNow().ToUnixTimeSeconds();
         var s = new ContinueSession
@@ -271,7 +271,7 @@ public sealed class ContinueService
                 catch (FormatException ex) { throw new ApiException(400, ex.Message); }
             }
             if (!game.Board.IsLegal(move))
-                throw new ApiException(400, $"Illegal move {move}.");
+                throw new ApiException(400, $"非法着法 {move} / Illegal move {move}.");
             game.MakeMove(move);
             Save(s, game);
             await AiReplyAsync(s, ct);
@@ -314,7 +314,7 @@ public sealed class ContinueService
     }
 
     private ContinueSession Load(string id) =>
-        (IsSessionId(id) ? _store.Get(id) : null) ?? throw new ApiException(404, "Session not found.");
+        (IsSessionId(id) ? _store.Get(id) : null) ?? throw new ApiException(404, "找不到续弈会话 / Continue session not found.");
 
     /// <summary>Session ids are Guid "N" strings: exactly 32 lowercase hex characters.</summary>
     public static bool IsSessionId(string? id) =>
