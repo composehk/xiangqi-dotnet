@@ -288,6 +288,7 @@ function render() {
   }
   paintStatus();
   paintLobbyActive();
+  updateGameActions();
 }
 
 function onBoardClick(event) {
@@ -453,6 +454,87 @@ function isAiTurn() {
   if (!state.seats || state.status !== "ongoing") return false;
   const seat = state.sideToMove === "black" ? state.seats.black : state.seats.red;
   return !!(seat && seat.kind === "ai");
+}
+
+function opponentSeat() {
+  if (!state.seats || (session.color !== "red" && session.color !== "black")) return null;
+  return session.color === "red" ? state.seats.black : state.seats.red;
+}
+
+function vsBuiltinAi() {
+  const seat = opponentSeat();
+  return !!(seat && seat.kind === "ai");
+}
+
+function seatedToAct() {
+  return !!session.token && !session.cont && !preview && !session.spectating && !!state.id;
+}
+
+function updateGameActions() {
+  const row = document.getElementById("gameActions");
+  const resignBtn = document.getElementById("resignBtn");
+  const undoBtn = document.getElementById("undoBtn");
+  if (!row || !resignBtn || !undoBtn) return;
+  const seated = seatedToAct();
+  const ongoing = state.status === "ongoing";
+  const aiGame = seated && vsBuiltinAi();
+  row.hidden = !(seated && (ongoing || aiGame));
+  resignBtn.hidden = !ongoing;
+  resignBtn.disabled = busy || !seated || !ongoing;
+  undoBtn.hidden = !aiGame;
+  const aiThinking = ongoing && state.sideToMove !== session.color;
+  undoBtn.disabled = busy || !aiGame || aiThinking;
+}
+
+function clearMoveBookkeeping() {
+  selected = null;
+  legalMoves = [];
+  notice = null;
+  seenPly = -1;
+}
+
+async function resignGame() {
+  if (busy || !seatedToAct() || state.status !== "ongoing") return;
+  if (!window.confirm("确定认输？ Resign this game?")) return;
+  busy = true;
+  render();
+  try {
+    const result = await postJson("/api/rooms/" + session.roomId + "/resign", { token: session.token });
+    if (!result.ok) {
+      setNotice((result.data && result.data.error) || "认输失败 · Could not resign.", "error");
+      render();
+      return;
+    }
+    clearMoveBookkeeping();
+    await applyState(result.data);
+    setNotice("你已认输 · You resigned", "info");
+    render();
+  } finally {
+    busy = false;
+    render();
+  }
+}
+
+async function undoMove() {
+  if (busy || !seatedToAct() || !vsBuiltinAi()) return;
+  if (state.status === "ongoing" && state.sideToMove !== session.color) return;
+  busy = true;
+  render();
+  try {
+    const result = await postJson("/api/rooms/" + session.roomId + "/undo", { token: session.token });
+    if (!result.ok) {
+      setNotice((result.data && result.data.error) || "无法悔棋 · Could not undo.", "error");
+      render();
+      return;
+    }
+    clearMoveBookkeeping();
+    await applyState(result.data);
+    setNotice("已悔棋 · Move undone", "info");
+    render();
+  } finally {
+    busy = false;
+    render();
+  }
 }
 
 function kindLabel(seat) {
@@ -688,6 +770,8 @@ async function init() {
   ensureBoard();
   render();
   document.getElementById("newGameForm").addEventListener("submit", function (event) { void newGame(event); });
+  document.getElementById("resignBtn").addEventListener("click", function () { void resignGame(); });
+  document.getElementById("undoBtn").addEventListener("click", function () { void undoMove(); });
   document.getElementById("refresh").addEventListener("click", function () { void loadLobby(); });
   try { await restore(); }
   catch (err) { console.warn(err); }

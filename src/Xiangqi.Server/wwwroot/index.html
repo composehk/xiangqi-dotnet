@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <title>象棋擂台 Xiangqi Arena</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -44,6 +45,10 @@
         </label>
         <button id="newGame" type="submit">新对局 New Game</button>
       </form>
+      <div id="gameActions" class="controls actions" hidden>
+        <button id="resignBtn" type="button" class="secondary">认输 Resign</button>
+        <button id="undoBtn" type="button" class="secondary">悔棋 Undo</button>
+      </div>
       <p id="message" class="message" aria-live="polite">点击己方棋子，再点高亮的落点。 Click a piece, then a highlighted point.</p>
     </section>
     <aside class="lobby">

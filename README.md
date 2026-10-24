@@ -361,6 +361,26 @@ curl -s http://127.0.0.1:5080/api/rooms/7d1c0c3e-1b4a-4e0a-9c2e-6f0a9b1c2d3e/joi
 { "token": "c3d4…", "color": "black", "state": { } }
 ```
 
+### `POST /api/rooms/{id}/resign` 与 `/undo`
+
+body `{ "token": "..." }`。`resign`：持有任一座位令牌的一方认输，返回最新 `state`。`undo`：仅人机房间，退回到你再次行棋的局面（若 AI 正在思考返回 `409`，无可退返回 `400`）。错误信息为「中文 / English」。
+
+Body `{ "token": "..." }`. `resign`: the holder of either seat's token resigns and gets the new `state`. `undo`: human-vs-built-in-AI rooms only; rewinds to your next turn (`409` while the AI is thinking, `400` when nothing can be undone). Error messages are "中文 / English".
+
+### 擂台配置 Arena configuration
+
+| 键 Key | 默认 Default | 说明 Meaning |
+| --- | --- | --- |
+| `Arena:MaxRooms` | `300` | 房间上限，满了返回 503。Room cap; 503 when full. |
+| `Arena:AllowAiVsAi` | `false` | 是否允许 AI 对 AI 房间。Allow AI-vs-AI rooms. |
+| `Arena:RoomIdleMinutes` / `FinishedRoomMinutes` | `60` / `10` | 空闲或已结束房间的清理时间。Idle / finished room expiry. |
+| `Arena:CreatePerMinute` / `ActionPerMinute` | `20` / `240` | 每 IP 每分钟创建房间 / 走子加入认输悔棋次数，`0` 关闭。Per-IP limits; `0` disables. |
+| `Cors:AllowedOrigins` / `Cors:AllowAnyOrigin` | `[]` / `false` | 见上。See above. |
+| `Forwarded:KnownProxies` / `KnownNetworks` | `[]` | 仅当列出反向代理时才信任 `X-Forwarded-*`；默认直连，不信任。Trust `X-Forwarded-*` only from listed proxies; default is direct, untrusted. |
+| `Payment:ExpiredPaymentGraceMinutes` | `1440` | 会话过期后仍可提交已完成的付款的宽限期（验证规则不变）。Grace window after a session expires in which an already-made payment can still be submitted (verification rules unchanged). |
+
+超过限速返回 `429`，带 `Retry-After` 和中英文 JSON。Rate-limited calls return `429` with `Retry-After` and a bilingual JSON error.
+
 ## 外部 Bot 协议 External bot protocol
 
 1. 创建带 `bot` 座位的房间，或对空位 `POST /join`，`kind` 为 `bot`。保存返回的令牌，它只代表那一方。
@@ -372,9 +392,9 @@ curl -s http://127.0.0.1:5080/api/rooms/7d1c0c3e-1b4a-4e0a-9c2e-6f0a9b1c2d3e/joi
 4. `400` 表示着法非法或对局已结束，`403` 表示还没轮到这个令牌，`404` 表示房间不存在。不要替 `ai` 座位走子，服务器会自己走。
    `400` means illegal or the game is over, `403` means it is not this token's turn, `404` means the room is gone. Do not move for an `ai` seat; the server plays those turns.
 
-浏览器里的跨源调用已放开 CORS（任意 Origin，无凭据）。令牌放在 JSON 里，不要放在 URL 上。
+浏览器里的跨源调用默认只允许本机（localhost）和 `Cors:AllowedOrigins` 里列出的来源，无凭据；`Cors:AllowAnyOrigin=true` 可重新放开（不建议公网使用）。令牌放在 JSON 里，不要放在 URL 上。
 
-Cross-origin browser calls are allowed (any origin, no credentials). Send the token in JSON, not in the URL.
+Cross-origin browser calls are allowed only from localhost and the origins listed in `Cors:AllowedOrigins` (no credentials); `Cors:AllowAnyOrigin=true` re-opens it (not recommended on the public internet). Send the token in JSON, not in the URL. Non-browser bots are not affected by CORS.
 
 ```javascript
 const connection = new signalR.HubConnectionBuilder()
