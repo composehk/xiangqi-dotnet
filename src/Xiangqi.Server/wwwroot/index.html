@@ -55,6 +55,7 @@
       <section class="continue" aria-labelledby="contTitle">
         <h2 id="contTitle">断点续弈 Continue</h2>
         <p id="contFee" class="fee">加载中…</p>
+        <p id="contDisclosure" class="fine">只购买续弈服务、与对局胜负无关、链上转账不可撤销且不退款。 This pays only for the continue service, has nothing to do with who wins, and on-chain transfers are irreversible and non-refundable.</p>
         <form id="contLoad" class="cont-form">
           <label>FEN（可选 optional）<input id="contFen" placeholder="rnbakabnr/9/1c5c1/... w - - 0 1" /></label>
           <label>着法 Moves（ICCS 或 中文记谱）<textarea id="contMoves" rows="3" placeholder="1. 炮二平五 马8进7 2. 马二进三 车9平8  或  h2e2 h9g7"></textarea></label>
@@ -77,6 +78,7 @@
         </div>
         <button type="button" id="contResume" class="secondary" hidden>恢复上次续弈 Resume</button>
         <div id="payBox" class="paybox" hidden>
+          <p class="fine">只购买续弈服务、与对局胜负无关、链上转账不可撤销且不退款。</p>
           <p>状态：<b id="payStatus"></b></p>
           <p>签名消息：<code id="payMessage"></code> <button type="button" id="copyMsg" class="secondary small">复制</button></p>
           <p>收款地址：<code id="payTo"></code></p>

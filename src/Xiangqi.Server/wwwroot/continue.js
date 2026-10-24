@@ -7,7 +7,9 @@
   let ply = 0;
   let cs = null;          // continue session dto (+ token)
   let pollTimer = null;
+  let pendingTx = null;   // last broadcast txid awaiting confirmation
   const STORE = "xiangqi-continue";
+  const HEX64 = /^[0-9a-fA-F]{64}$/;
 
   function fenRows(fen) {
     const rows = fen.split(" ")[0].split("/");
@@ -62,11 +64,22 @@
   }
 
   function save() {
-    if (cs) localStorage.setItem(STORE, JSON.stringify({ id: cs.id, token: cs.token }));
+    if (cs) localStorage.setItem(STORE, JSON.stringify({ id: cs.id, token: cs.token, txid: pendingTx }));
+  }
+
+  function setPendingTx(txid) {
+    pendingTx = txid == null ? null : String(txid);
+    save();
+  }
+
+  function clearPendingTx() {
+    pendingTx = null;
+    save();
   }
 
   async function adopt(dto, token) {
     cs = Object.assign({}, dto, { token: token || (cs && cs.token) });
+    if (cs.status === "active") pendingTx = null;
     save();
     session = { roomId: null, token: cs.token, color: cs.humanColor, spectating: false, cont: true,
       contStatus: cs.status, difficulty: cs.difficulty };
@@ -94,7 +107,7 @@
     if (!cs) return;
     $("payMessage").textContent = cs.message;
     $("payTo").textContent = cs.payToAddress || "未配置收款地址";
-    $("payStatus").textContent = ({ pending_auth: "① 待签名 Sign", pending_payment: "② 待支付 Pay", active: "已激活 Active", finished: "已结束 Finished" })[cs.status] || cs.status;
+    $("payStatus").textContent = ({ pending_auth: "① 待签名 Sign", pending_payment: "② 待支付 Pay", active: "已激活 Active", finished: "已结束 Finished", expired: "已过期 Expired" })[cs.status] || cs.status;
     $("authFields").hidden = cs.status !== "pending_auth";
     $("txFields").hidden = cs.status !== "pending_payment";
     $("kasBtn").textContent = cs.status === "pending_auth" ? "KasWare 连接并签名" : "KasWare 支付 1 KAS";
@@ -109,17 +122,36 @@
     return true;
   }
 
+  function retryPay(txid) {
+    clearTimeout(pollTimer);
+    pollTimer = setTimeout(function () { void pay(txid); }, 5000);
+  }
+
   async function pay(txid) {
-    const res = await postJson("/api/continue/sessions/" + cs.id + "/payment", { token: cs.token, txid: txid });
-    if (res.status === 202) {
-      info((res.data && res.data.info) || "交易确认中，稍后自动重试… Waiting for confirmations…", "");
-      clearTimeout(pollTimer);
-      pollTimer = setTimeout(function () { void pay(txid); }, 5000);
+    setPendingTx(txid);
+    let res;
+    try {
+      res = await postJson("/api/continue/sessions/" + cs.id + "/payment", { token: cs.token, txid: txid });
+    } catch (err) {
+      info("网络异常，5 秒后重试支付确认… Network error, retrying payment check…", "");
+      retryPay(txid);
       return;
     }
-    if (!res.ok) { info((res.data && res.data.error) || "支付验证失败。", "error"); return; }
-    await adopt(res.data);
-    info("续弈服务费已确认，开始对局！ Paid — your move.", "");
+    if (res.status === 202 || res.status === 429 || res.status >= 500) {
+      info((res.data && res.data.info) || "交易确认中，稍后自动重试… Waiting for confirmations…", "");
+      retryPay(txid);
+      return;
+    }
+    if (res.ok) {
+      clearPendingTx();
+      await adopt(res.data);
+      info("续弈服务费已确认，开始对局！ Paid — your move.", "");
+      return;
+    }
+    if (res.status === 400 || res.status === 403 || res.status === 404 || res.status === 409 || res.status === 410 || res.status === 413) {
+      clearPendingTx();
+    }
+    info((res.data && res.data.error) || "支付验证失败。", "error");
   }
 
   async function kasware() {
@@ -138,7 +170,8 @@
         if (typeof tx === "string" && tx.trim().startsWith("{")) { try { const o = JSON.parse(tx); txid = o.id || o.txid || o.transactionId; } catch { } }
         else if (tx && typeof tx === "object") txid = tx.id || tx.txid || tx.transactionId;
         $("manTx").value = txid || "";
-        await pay(String(txid || "").trim());
+        setPendingTx(String(txid).trim());
+        await pay(String(txid).trim());
       }
     } catch (err) {
       info("钱包操作失败: " + (err && err.message ? err.message : err), "error");
@@ -162,11 +195,25 @@
     try { saved = JSON.parse(localStorage.getItem(STORE) || "null"); } catch { saved = null; }
     if (!saved || !saved.id) return;
     const r = await fetch("/api/continue/sessions/" + saved.id);
-    if (!r.ok) { localStorage.removeItem(STORE); return; }
+    if (r.status === 404) { localStorage.removeItem(STORE); return; }
+    if (!r.ok) return;
     const dto = await r.json();
     if (dto.status === "finished" || dto.state.status !== "ongoing") return;
+    if (typeof saved.txid === "string" && HEX64.test(saved.txid) && dto.status === "pending_payment") {
+      pendingTx = saved.txid;
+      cs = { token: saved.token };
+      info("检测到未确认的支付，正在自动重试… Resuming payment check…", "");
+      await adopt(dto, saved.token);
+      void pay(saved.txid);
+      return;
+    }
     $("contResume").hidden = false;
-    $("contResume").onclick = function () { cs = { token: saved.token }; void adopt(dto, saved.token); $("contResume").hidden = true; };
+    $("contResume").onclick = function () {
+      pendingTx = saved.txid || null;
+      cs = { token: saved.token };
+      void adopt(dto, saved.token);
+      $("contResume").hidden = true;
+    };
   }
 
   async function init() {
