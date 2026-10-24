@@ -162,7 +162,7 @@ public sealed class ArenaService : IHostedService
         string name = "人机 · 执" + (humanIsRed ? "红" : "黑") + " · " + DifficultyLabel(difficulty);
         SeatKind red = humanIsRed ? SeatKind.Human : SeatKind.BuiltinAi;
         SeatKind black = humanIsRed ? SeatKind.BuiltinAi : SeatKind.Human;
-        CreateRoomResponseDto created = AddRoom(name, red, black, difficulty, isPublic: false);
+        CreateRoomResponseDto created = AddRoom(name, red, black, difficulty, isPublic: request.Spectate == true);
         string? token = humanIsRed ? created.Tokens.Red : created.Tokens.Black;
         if (string.IsNullOrEmpty(token))
             throw new ApiException(500, "人类座位没有令牌 / Human seat has no token.");

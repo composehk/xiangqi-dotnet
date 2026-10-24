@@ -8,7 +8,7 @@ public sealed record ErrorDto(string Error);
 
 public sealed record CreateRoomRequest(string? Name, string? RedKind, string? BlackKind, string? Difficulty);
 
-public sealed record VsAiRequest(string? HumanColor, string? Difficulty);
+public sealed record VsAiRequest(string? HumanColor, string? Difficulty, bool? Spectate = null);
 
 public sealed record MoveRequest(string? Move, string? Token);
 

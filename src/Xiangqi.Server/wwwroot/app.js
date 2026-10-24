@@ -232,6 +232,8 @@ function isOwn(piece) {
 function render() {
   syncFlip();
   ensureBoard();
+  const wrap = document.querySelector(".board-wrap");
+  if (wrap) wrap.classList.toggle("board-busy", busy);
   document.getElementById("board").classList.toggle("can-move", canMove());
   highlightLayer.replaceChildren();
   pieceLayer.replaceChildren();
@@ -299,6 +301,13 @@ function onBoardClick(event) {
 
 function onSquare(file, rank) {
   if (busy) return;
+  if (state.status !== "ongoing" || state.sideToMove !== session.color) {
+    if (session.token && !preview && state.status === "ongoing" && state.sideToMove !== session.color) {
+      setNotice("还没轮到你 · Not your turn", "error");
+      render();
+    }
+    return;
+  }
   if (!canMove()) {
     if (session.token && !preview && state.status === "ongoing") {
       if (state.sideToMove !== session.color) {
@@ -315,6 +324,7 @@ function onSquare(file, rank) {
   if (selected) {
     const candidate = selected + name;
     if (legalMoves.indexOf(candidate) >= 0) {
+      if (busy || state.sideToMove !== session.color || state.status !== "ongoing") return;
       notice = null;
       void playMove(candidate);
       return;
@@ -345,8 +355,10 @@ function onSquare(file, rank) {
 async function playMove(notation) {
   if (session.cont && window.XqContinue) return window.XqContinue.play(notation);
   if (busy || !session.token || !session.roomId) return;
+  if (state.sideToMove !== session.color || state.status !== "ongoing") return;
   busy = true;
   selected = null;
+  legalMoves = [];
   render();
   try {
     const result = await postJson("/api/rooms/" + session.roomId + "/moves", {
@@ -361,6 +373,7 @@ async function playMove(notation) {
     await applyState(result.data);
   } finally {
     busy = false;
+    render();
   }
 }
 
@@ -377,8 +390,21 @@ async function applyState(next) {
   seenPly = ply;
   preview = false;
   state = next;
+  syncSetupFromState();
   await loadLegal();
   render();
+}
+
+function syncSetupFromState() {
+  if (!state || !state.seats) return;
+  const diffEl = document.getElementById("difficulty");
+  const colorEl = document.getElementById("color");
+  const red = state.seats.red;
+  const black = state.seats.black;
+  const ai = red && red.kind === "ai" ? red : black && black.kind === "ai" ? black : null;
+  if (diffEl && ai && ai.difficulty) diffEl.value = ai.difficulty;
+  if (colorEl && session.token && (session.color === "red" || session.color === "black"))
+    colorEl.value = session.color;
 }
 
 async function loadLegal() {
@@ -418,7 +444,10 @@ function paintStatus() {
   }
   const red = state.seats && state.seats.red;
   const black = state.seats && state.seats.black;
-  if (!session.cont) bar.textContent = (state.name || "房间") + " · 红 " + kindLabel(red) + " vs 黑 " + kindLabel(black) + " · " + conn;
+  if (!session.cont) {
+    const link = conn.indexOf("待机") >= 0 || conn.indexOf("Idle") >= 0 ? "" : " · " + conn;
+    bar.textContent = (state.name || "房间") + " · 红 " + kindLabel(red) + " vs 黑 " + kindLabel(black) + link;
+  }
   if (notice && notice.ply === seenPly) {
     paintNotice(message);
     return;
@@ -594,7 +623,12 @@ async function newGame(event) {
   try {
     const humanColor = document.getElementById("color").value;
     const difficulty = document.getElementById("difficulty").value;
-    const result = await postJson("/api/games/vs-ai", { humanColor: humanColor, difficulty: difficulty });
+    const spectate = document.getElementById("spectateOpt");
+    const result = await postJson("/api/games/vs-ai", {
+      humanColor: humanColor,
+      difficulty: difficulty,
+      spectate: !!(spectate && spectate.checked)
+    });
     if (!result.ok) {
       setNotice((result.data && result.data.error) || "无法开始对局。 Could not start a game.", "error");
       render();
@@ -633,6 +667,7 @@ async function spectate(roomId) {
   }
   preview = false;
   await applyState(await response.json());
+  syncSetupFromState();
   await watchRoom(roomId);
   await syncRoom(roomId);
   paintLobbyActive();
@@ -646,7 +681,8 @@ async function syncRoom(roomId) {
 
 function setConn(mode) {
   const el = document.getElementById("conn");
-  if (mode === "live") el.textContent = "实时 Live";
+  if (!session.roomId || mode === "idle") el.textContent = "待机 Idle";
+  else if (mode === "live") el.textContent = "实时 Live";
   else if (mode === "poll") el.textContent = "轮询 Polling";
   else el.textContent = "未连接 Offline";
 }
@@ -656,9 +692,9 @@ function stopPoll() {
   pollTimer = null;
 }
 
-function startPoll(roomId) {
+function startPoll(roomId, label) {
   stopPoll();
-  setConn("poll");
+  setConn(label || "poll");
   pollTimer = setInterval(function () { void syncRoom(roomId); }, 1000);
 }
 
@@ -682,8 +718,8 @@ function ensureConnection() {
       });
     });
     connection.onclose(function () {
-      if (session.roomId) startPoll(session.roomId);
-      else setConn("offline");
+      if (session.roomId) startPoll(session.roomId, "offline");
+      else setConn("idle");
     });
   }
   return connection;
@@ -763,11 +799,13 @@ async function restore() {
   session = saved;
   preview = false;
   await applyState(await response.json());
+  syncSetupFromState();
   await watchRoom(saved.roomId);
 }
 
 async function init() {
   ensureBoard();
+  setConn("idle");
   render();
   document.getElementById("newGameForm").addEventListener("submit", function (event) { void newGame(event); });
   document.getElementById("resignBtn").addEventListener("click", function () { void resignGame(); });
