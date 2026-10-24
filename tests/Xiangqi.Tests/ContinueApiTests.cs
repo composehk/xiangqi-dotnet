@@ -31,18 +31,26 @@ public class ContinueApiTests : IClassFixture<WebApplicationFactory<Program>>
         {
             b.UseSetting("Payment:PayToAddress", PaymentVerifierTests.PayTo);
             b.UseSetting("Payment:MinConfirmations", "10");
+            b.UseSetting("Payment:PaymentMinIntervalSeconds", "0");
             b.ConfigureServices(services =>
             {
                 services.RemoveAll<IPaymentVerifier>();
                 services.AddSingleton<IPaymentVerifier>(sp => new KaspaPaymentVerifier(
                     new HttpClient(new PaymentVerifierTests.FakeHandler(req =>
                         req.RequestUri!.AbsolutePath.StartsWith("/transactions/")
-                            ? tx(req.RequestUri.AbsolutePath["/transactions/".Length..])
+                            ? Echo(tx, req.RequestUri.AbsolutePath["/transactions/".Length..])
                             : (HttpStatusCode.OK, $"{{\"blueScore\":{virtualScore}}}"))),
                     sp.GetRequiredService<PaymentOptions>()));
             });
         });
         return app.CreateClient();
+    }
+
+    /// <summary>The mocked API echoes the requested txid like the real one (the verifier rejects mismatches).</summary>
+    private static (HttpStatusCode, string) Echo(Func<string, (HttpStatusCode, string)> tx, string id)
+    {
+        var (code, body) = tx(id);
+        return (code, body.Replace(PaymentVerifierTests.Txid, id));
     }
 
     private static async Task<(HttpStatusCode Status, JsonElement Body)> Send(Task<HttpResponseMessage> call)
@@ -82,12 +90,12 @@ public class ContinueApiTests : IClassFixture<WebApplicationFactory<Program>>
         var c = _factory.CreateClient();
         var (_, cfg) = await Send(c.GetAsync("/api/continue/config"));
         Assert.False(cfg.GetProperty("enabled").GetBoolean());
-        var s = await Create(c);
-        Assert.Equal("pending_auth", s.GetProperty("status").GetString());
-        Assert.Equal(JsonValueKind.Null, s.GetProperty("payToAddress").ValueKind);
-        Assert.Equal(HttpStatusCode.ServiceUnavailable, (await Auth(c, s)).Item1);
-        Assert.Equal(HttpStatusCode.ServiceUnavailable, (await Pay(c, s, new string('b', 64))).Item1);
-        Assert.Equal(HttpStatusCode.PaymentRequired, (await Move(c, s, "h0g2")).Item1);
+        // L5: creation itself is refused while the paid entry is closed, and nothing is stored.
+        var (created, _) = await Send(c.PostAsJsonAsync("/api/continue/sessions", new { moves = "炮二平五", ply = 1 }, Json));
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, created);
+        var ghost = System.Text.Json.JsonDocument.Parse("{\"id\":\"" + new string('a', 32) + "\",\"token\":\"x\"}").RootElement;
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, (await Auth(c, ghost)).Item1);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, (await Pay(c, ghost, new string('b', 64))).Item1);
     }
 
     [Fact]
