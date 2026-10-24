@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Xiangqi.Core;
 using Xiangqi.Engine;
 
@@ -31,26 +32,40 @@ internal sealed class Seat
 
 internal sealed class Room
 {
-    public Room(Guid id, string name, Game game, Seat red, Seat black)
+    public Room(Guid id, string name, Game game, Seat red, Seat black, bool isPublic)
     {
         Id = id;
         Name = name;
         CreatedAt = DateTimeOffset.UtcNow;
+        LastActivity = CreatedAt;
         Game = game;
         Red = red;
         Black = black;
+        IsPublic = isPublic;
     }
 
     public Guid Id { get; }
     public string Name { get; }
     public DateTimeOffset CreatedAt { get; }
+    public DateTimeOffset LastActivity { get; set; }
     public Game Game { get; }
     public Seat Red { get; }
     public Seat Black { get; }
+    public bool IsPublic { get; }
     public object Gate { get; } = new();
     public SemaphoreSlim PublishLock { get; } = new(1, 1);
     public bool AiRunning { get; set; }
     public long Version { get; set; }
+}
+
+/// <summary>Limits for the anonymous public arena. Bound from configuration section "Arena".</summary>
+public sealed class ArenaOptions
+{
+    public int MaxRooms { get; set; } = 300;
+    public bool AllowAiVsAi { get; set; } = false;
+    public int RoomIdleMinutes { get; set; } = 60;
+    public int FinishedRoomMinutes { get; set; } = 10;
+    public int SweepIntervalSeconds { get; set; } = 60;
 }
 
 /// <summary>
@@ -63,22 +78,58 @@ public sealed class ArenaService : IHostedService
     private readonly AlphaBetaEngine _engine = new();
     private readonly IHubContext<GameHub> _hub;
     private readonly ILogger<ArenaService> _logger;
+    private readonly ArenaOptions _options;
     private readonly CancellationTokenSource _shutdown = new();
+    private Task? _sweepLoop;
 
-    public ArenaService(IHubContext<GameHub> hub, ILogger<ArenaService> logger)
+    public ArenaService(IHubContext<GameHub> hub, ILogger<ArenaService> logger, IOptions<ArenaOptions> options)
     {
         _hub = hub;
         _logger = logger;
+        _options = options.Value;
     }
 
     public static string GroupName(Guid id) => "room:" + id.ToString("D");
 
-    public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    public Task StartAsync(CancellationToken cancellationToken)
+    {
+        if (_options.SweepIntervalSeconds > 0)
+            _sweepLoop = Task.Run(() => SweepLoopAsync());
+        return Task.CompletedTask;
+    }
 
-    public Task StopAsync(CancellationToken cancellationToken)
+    public async Task StopAsync(CancellationToken cancellationToken)
     {
         _shutdown.Cancel();
-        return Task.CompletedTask;
+        if (_sweepLoop is not null)
+            await _sweepLoop.ConfigureAwait(false);
+    }
+
+    private async Task SweepLoopAsync()
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(_options.SweepIntervalSeconds));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(_shutdown.Token).ConfigureAwait(false))
+            {
+                try
+                {
+                    SweepExpired(DateTimeOffset.UtcNow);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Arena room sweep failed.");
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Host is stopping.
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Arena room sweep loop failed.");
+        }
     }
 
     public bool Exists(Guid id) => _rooms.ContainsKey(id);
@@ -90,8 +141,11 @@ public sealed class ArenaService : IHostedService
 
         SeatKind redKind = ParseKind(request.RedKind, allowOpen: true);
         SeatKind blackKind = ParseKind(request.BlackKind, allowOpen: true);
+        if (redKind == SeatKind.BuiltinAi && blackKind == SeatKind.BuiltinAi && !_options.AllowAiVsAi)
+            throw new ApiException(403, "不允许创建 AI 对 AI 房间 / AI-vs-AI rooms are disabled");
+
         Difficulty difficulty = ParseDifficulty(request.Difficulty);
-        return AddRoom(request.Name, redKind, blackKind, difficulty);
+        return AddRoom(request.Name, redKind, blackKind, difficulty, isPublic: true);
     }
 
     public VsAiResponseDto CreateVsAi(VsAiRequest? request)
@@ -104,7 +158,7 @@ public sealed class ArenaService : IHostedService
         string name = "人机 · 执" + (humanIsRed ? "红" : "黑") + " · " + DifficultyLabel(difficulty);
         SeatKind red = humanIsRed ? SeatKind.Human : SeatKind.BuiltinAi;
         SeatKind black = humanIsRed ? SeatKind.BuiltinAi : SeatKind.Human;
-        CreateRoomResponseDto created = AddRoom(name, red, black, difficulty);
+        CreateRoomResponseDto created = AddRoom(name, red, black, difficulty, isPublic: false);
         string? token = humanIsRed ? created.Tokens.Red : created.Tokens.Black;
         if (string.IsNullOrEmpty(token))
             throw new ApiException(500, "Human seat has no token.");
@@ -117,10 +171,14 @@ public sealed class ArenaService : IHostedService
         Room[] rooms = _rooms.Values.ToArray();
         Array.Sort(rooms, (a, b) => a.CreatedAt.CompareTo(b.CreatedAt));
         var list = new List<RoomSummaryDto>(rooms.Length);
+        DateTimeOffset now = DateTimeOffset.UtcNow;
         foreach (Room room in rooms)
         {
             lock (room.Gate)
             {
+                if (!room.IsPublic || IsExpiredLocked(room, now))
+                    continue;
+
                 list.Add(new RoomSummaryDto(
                     room.Id,
                     room.Name,
@@ -184,6 +242,7 @@ public sealed class ArenaService : IHostedService
                 throw new ApiException(400, $"Illegal move {move}.");
 
             room.Game.MakeMove(move);
+            room.LastActivity = DateTimeOffset.UtcNow;
             version = ++room.Version;
             state = ProjectLocked(room);
         }
@@ -213,6 +272,7 @@ public sealed class ArenaService : IHostedService
             seat.Kind = kind;
             seat.Token = NewToken();
             token = seat.Token;
+            room.LastActivity = DateTimeOffset.UtcNow;
             version = ++room.Version;
             state = ProjectLocked(room);
         }
@@ -221,22 +281,56 @@ public sealed class ArenaService : IHostedService
         return new JoinResponseDto(token, ColorName(color), state);
     }
 
-    private CreateRoomResponseDto AddRoom(string? requestedName, SeatKind redKind, SeatKind blackKind, Difficulty difficulty)
+    /// <summary>
+    /// Drops rooms that have been idle past the ongoing or finished limit. Returns how many were removed.
+    /// </summary>
+    public int SweepExpired(DateTimeOffset now)
     {
+        int removed = 0;
+        foreach (KeyValuePair<Guid, Room> entry in _rooms)
+        {
+            bool expired;
+            lock (entry.Value.Gate)
+                expired = IsExpiredLocked(entry.Value, now);
+
+            if (expired && _rooms.TryRemove(entry.Key, out _))
+                removed++;
+        }
+
+        return removed;
+    }
+
+    private bool IsExpiredLocked(Room room, DateTimeOffset now)
+    {
+        TimeSpan idle = now - room.LastActivity;
+        if (room.Game.Status == GameStatus.Ongoing)
+            return idle > TimeSpan.FromMinutes(_options.RoomIdleMinutes);
+        return idle > TimeSpan.FromMinutes(_options.FinishedRoomMinutes);
+    }
+
+    private CreateRoomResponseDto AddRoom(string? requestedName, SeatKind redKind, SeatKind blackKind, Difficulty difficulty, bool isPublic)
+    {
+        if (_rooms.Count >= _options.MaxRooms)
+            throw new ApiException(503, "房间已满，请稍后再试 / server is full, try again later");
+
         Guid id = Guid.NewGuid();
         var room = new Room(
             id,
             CleanName(requestedName, id),
             new Game(),
             MakeSeat(redKind, difficulty),
-            MakeSeat(blackKind, difficulty));
+            MakeSeat(blackKind, difficulty),
+            isPublic);
 
         if (!_rooms.TryAdd(room.Id, room))
             throw new ApiException(500, "Could not create a room.");
 
         GameStateDto state;
         lock (room.Gate)
+        {
+            room.LastActivity = DateTimeOffset.UtcNow;
             state = ProjectLocked(room);
+        }
 
         ScheduleAi(room);
         return new CreateRoomResponseDto(
@@ -286,6 +380,7 @@ public sealed class ArenaService : IHostedService
                     && room.Game.Board.IsLegal(result.BestMove))
                 {
                     room.Game.MakeMove(result.BestMove);
+                    room.LastActivity = DateTimeOffset.UtcNow;
                     version = ++room.Version;
                     played = true;
                     _logger.LogInformation("AI played {Move} in room {RoomId}", result.BestMove, room.Id);
@@ -297,6 +392,10 @@ public sealed class ArenaService : IHostedService
             }
 
             if (!played)
+                return;
+
+            // The room may already have been swept. Publishing a detached room must not throw.
+            if (!_rooms.ContainsKey(room.Id))
                 return;
 
             ScheduleAi(room);

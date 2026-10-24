@@ -99,6 +99,7 @@ else
     });
 builder.Services.TryAddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<ContinueService>();
+builder.Services.Configure<ArenaOptions>(builder.Configuration.GetSection("Arena"));
 builder.Services.AddSingleton<ArenaService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<ArenaService>());
 
