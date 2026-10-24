@@ -29,6 +29,27 @@ builder.Services.AddCors(options =>
 });
 
 builder.Services.AddSignalR();
+
+// 断点续弈 (paid continue-from-position) — payment + persistence.
+var paymentOptions = new Xiangqi.Server.Kaspa.PaymentOptions();
+builder.Configuration.GetSection("Payment").Bind(paymentOptions);
+if (paymentOptions.TestMode && builder.Environment.IsProduction())
+    throw new InvalidOperationException("Payment:TestMode must never be enabled in Production.");
+builder.Services.AddSingleton(paymentOptions);
+string dbPath = builder.Configuration["Storage:DbPath"] is { Length: > 0 } configuredDb
+    ? configuredDb
+    : !string.IsNullOrWhiteSpace(testing)
+        ? Path.Combine(Path.GetTempPath(), $"xiangqi-test-{Guid.NewGuid():N}.db")
+        : "App_Data/xiangqi.db";
+if (!Path.IsPathRooted(dbPath))
+    dbPath = Path.Combine(builder.Environment.ContentRootPath, dbPath);
+builder.Services.AddSingleton(new ContinueStore(dbPath));
+if (paymentOptions.TestMode)
+    builder.Services.AddSingleton<Xiangqi.Server.Kaspa.IPaymentVerifier, TestModePaymentVerifier>();
+else
+    builder.Services.AddHttpClient<Xiangqi.Server.Kaspa.IPaymentVerifier, Xiangqi.Server.Kaspa.KaspaPaymentVerifier>(c =>
+        c.Timeout = TimeSpan.FromSeconds(15));
+builder.Services.AddSingleton<ContinueService>();
 builder.Services.AddSingleton<ArenaService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<ArenaService>());
 
@@ -60,6 +81,30 @@ app.MapPost("/api/rooms/{id:guid}/moves", (Guid id, MoveRequest? request, ArenaS
 
 app.MapPost("/api/rooms/{id:guid}/join", (Guid id, JoinRequest? request, ArenaService arena) =>
     ApiResults.OfAsync(async () => Results.Ok(await arena.JoinAsync(id, request))));
+
+app.MapGet("/api/continue/config", (ContinueService svc) => Results.Ok(svc.Config()));
+
+app.MapPost("/api/continue/parse", (ParseRecordRequest? request) =>
+    ApiResults.Of(() => Results.Ok(ContinueService.ParseRecord(request))));
+
+app.MapPost("/api/continue/sessions", (CreateContinueRequest? request, ContinueService svc) =>
+    ApiResults.Of(() => Results.Ok(svc.Create(request))));
+
+app.MapGet("/api/continue/sessions/{id}", (string id, ContinueService svc) =>
+    ApiResults.Of(() => Results.Ok(svc.Get(id))));
+
+app.MapPost("/api/continue/sessions/{id}/auth", (string id, ContinueAuthRequest? request, ContinueService svc) =>
+    ApiResults.Of(() => Results.Ok(svc.Authorize(id, request))));
+
+app.MapPost("/api/continue/sessions/{id}/payment", (string id, ContinuePaymentRequest? request, ContinueService svc, CancellationToken ct) =>
+    ApiResults.OfAsync(async () =>
+    {
+        var (status, session) = await svc.SubmitPaymentAsync(id, request, ct);
+        return Results.Json(session, statusCode: status);
+    }));
+
+app.MapPost("/api/continue/sessions/{id}/moves", (string id, ContinueMoveRequest? request, ContinueService svc, CancellationToken ct) =>
+    ApiResults.OfAsync(async () => Results.Ok(await svc.PlayAsync(id, request, ct))));
 
 app.MapHub<GameHub>("/hub/game").RequireCors("open");
 
