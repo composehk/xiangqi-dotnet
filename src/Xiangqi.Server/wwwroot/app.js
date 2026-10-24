@@ -198,6 +198,7 @@ function parseSquare(text) {
 }
 
 function canMove() {
+  if (session.cont && session.contStatus !== "active") return false;
   return !preview && !!session.token && state.status === "ongoing" && state.sideToMove === session.color;
 }
 
@@ -299,6 +300,7 @@ function onSquare(file, rank) {
 }
 
 async function playMove(notation) {
+  if (session.cont && window.XqContinue) return window.XqContinue.play(notation);
   if (busy || !session.token || !session.roomId) return;
   busy = true;
   selected = null;
@@ -339,6 +341,10 @@ async function applyState(next) {
 async function loadLegal() {
   const ticket = ++legalTicket;
   legalMoves = [];
+  if (session.cont) {
+    legalMoves = Array.isArray(state.legalMoves) ? state.legalMoves : [];
+    return;
+  }
   if (preview || !state.id || state.status !== "ongoing") return;
   const response = await fetch("/api/rooms/" + state.id + "/moves");
   if (ticket !== legalTicket || !response.ok) return;
@@ -364,9 +370,12 @@ function paintStatus() {
     }
     return;
   }
+  if (session.cont) {
+    bar.textContent = "断点续弈 Continue · 你执" + (session.color === "black" ? "黑" : "红") + " · AI·" + diffLabel(session.difficulty);
+  }
   const red = state.seats && state.seats.red;
   const black = state.seats && state.seats.black;
-  bar.textContent = (state.name || "房间") + " · 红 " + kindLabel(red) + " vs 黑 " + kindLabel(black) + " · " + conn;
+  if (!session.cont) bar.textContent = (state.name || "房间") + " · 红 " + kindLabel(red) + " vs 黑 " + kindLabel(black) + " · " + conn;
   if (notice && notice.ply === seenPly) {
     paintNotice(message);
     return;
@@ -380,6 +389,8 @@ function paintStatus() {
   }
   let text = state.inCheck ? "将军 Check · " : "";
   if (canMove()) text += "轮到你 Your turn";
+  else if (session.cont && state.status === "ongoing" && session.contStatus !== "active") text += "待支付续弈服务费 Awaiting service fee";
+  else if (session.cont && state.status === "ongoing") text += "电脑思考中 AI is thinking";
   else if (isAiTurn()) text += "电脑思考中 AI is thinking";
   else if (!session.token) text += "观战中 Spectating · " + sideText();
   else text += "等待对方 Waiting · " + sideText();

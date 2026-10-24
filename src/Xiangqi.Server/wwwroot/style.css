@@ -237,3 +237,18 @@ h2 { font-size: 1.2rem; letter-spacing: 0.08em; }
   .board-card, .lobby { width: 100%; max-height: none; }
   .top { padding: 16px 16px 4px; }
 }
+
+/* 断点续弈 panel */
+.continue { margin-top: 18px; border-top: 1px solid rgba(0,0,0,.12); padding-top: 12px; }
+.continue h2 { margin: 0 0 6px; }
+.continue .fee { font-size: 13px; word-break: break-all; opacity: .85; }
+.cont-form label, .cont-opts label { display: block; font-size: 13px; margin: 6px 0; }
+.cont-form input, .cont-form textarea, .paybox input { width: 100%; box-sizing: border-box; font: inherit; padding: 4px 6px; margin: 2px 0; }
+.replay .nav { display: flex; gap: 4px; align-items: center; margin: 8px 0; }
+.replay .nav input[type=range] { flex: 1; }
+.cont-opts { display: flex; gap: 10px; }
+.paybox { margin-top: 10px; padding: 8px; border: 1px dashed rgba(0,0,0,.25); border-radius: 6px; font-size: 13px; }
+.paybox code { word-break: break-all; }
+button.small { padding: 2px 6px; font-size: 12px; }
+.replay .nav button { padding: 4px 8px; min-width: 0; }
+.lobby { overflow-y: auto; }
