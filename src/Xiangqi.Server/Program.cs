@@ -213,10 +213,35 @@ if (honorForwarded)
     });
 }
 
+// Kestrel's default Server header advertises the stack. Leave it off; the header middleware also never sets X-Powered-By.
+builder.WebHost.ConfigureKestrel(k => k.AddServerHeader = false);
+
 var app = builder.Build();
 
 if (honorForwarded)
     app.UseForwardedHeaders();
+
+// OnStarting runs when the response starts, including static files, API errors, and 429/413 short-circuits.
+app.Use(async (ctx, next) =>
+{
+    ctx.Response.OnStarting(() =>
+    {
+        var headers = ctx.Response.Headers;
+        headers["X-Content-Type-Options"] = "nosniff";
+        headers["Referrer-Policy"] = "no-referrer";
+        headers["X-Frame-Options"] = "DENY";
+        headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()";
+        string wsOrigin = ctx.Request.IsHttps ? $"wss://{ctx.Request.Host}" : $"ws://{ctx.Request.Host}";
+        headers["Content-Security-Policy"] =
+            "default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' "
+            + wsOrigin
+            + "; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
+        if (ctx.Request.IsHttps)
+            headers["Strict-Transport-Security"] = "max-age=15552000";
+        return Task.CompletedTask;
+    });
+    await next();
+});
 
 app.UseCors("open");
 

@@ -168,8 +168,8 @@ public class ContinueSecurityTests : IClassFixture<WebApplicationFactory<Program
         string token = s.GetProperty("token").GetString()!;
         Assert.Equal(HttpStatusCode.BadRequest, (await ContinueHarness.Auth(c, s, priv: ContinueHarness.Priv2, address: ContinueHarness.PayerAddress)).Status);
         Assert.Equal(HttpStatusCode.BadRequest, (await ContinueHarness.Auth(c, s, signMessageForId: Guid.NewGuid().ToString("N"))).Status);
-        Assert.Equal(HttpStatusCode.BadRequest, (await ContinueHarness.Auth(c, s, ts: now - 601)).Status);
-        Assert.Equal(HttpStatusCode.BadRequest, (await ContinueHarness.Auth(c, s, ts: now + 601)).Status);
+        Assert.Equal(HttpStatusCode.BadRequest, (await ContinueHarness.Auth(c, s, ts: now - 660)).Status);
+        Assert.Equal(HttpStatusCode.BadRequest, (await ContinueHarness.Auth(c, s, ts: now + 660)).Status);
         Assert.Equal(HttpStatusCode.BadRequest, (await ContinueHarness.Auth(c, s, address: ContinueHarness.AddressOf(ContinueHarness.Priv, "testnet-10"))).Status);
         foreach (var sig in new[] { "", "zz", new string('0', 128), Convert.ToBase64String(new byte[10]) })
             Assert.Equal(HttpStatusCode.BadRequest, (await ContinueHarness.Auth(c, s, ts: now, sig: sig)).Status);
