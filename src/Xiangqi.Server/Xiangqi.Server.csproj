@@ -9,7 +9,7 @@
       Lowers memory use on small hosts. Cap the heap per environment with DOTNET_GCHeapHardLimit
       or runtimeconfig System.GC.HeapHardLimit; do not set a limit in this project.
     -->
-    <ServerGarbageCollector>false</ServerGarbageCollector>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
     <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
   </PropertyGroup>
 

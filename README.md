@@ -146,9 +146,9 @@ Vs-AI rooms are private by default (`isPublic: false`) and are omitted from `GET
 
 The SignalR client and fonts are self-hosted (`wwwroot/lib/signalr.min.js`, the system font stack). Content-Security-Policy is `'self'` only. If that script fails to start a hub connection, the page polls `GET /api/rooms/{id}` once a second.
 
-`runtimeconfig` 使用工作站、非并发 GC（`ServerGarbageCollector=false`，`ConcurrentGarbageCollection=false`），适合小主机。堆上限可用环境变量 `DOTNET_GCHeapHardLimit` 或 `System.GC.HeapHardLimit` 设置，工程本身不写死上限。
+`runtimeconfig` 使用工作站、非并发 GC（`ServerGarbageCollection=false`，`ConcurrentGarbageCollection=false`），适合小主机。堆上限可用环境变量 `DOTNET_GCHeapHardLimit` 或 `System.GC.HeapHardLimit` 设置，工程本身不写死上限。
 
-The runtimeconfig uses workstation non-concurrent GC (`ServerGarbageCollector=false`, `ConcurrentGarbageCollection=false`) for small hosts. Cap the heap with `DOTNET_GCHeapHardLimit` or `System.GC.HeapHardLimit`; this project does not set a limit itself.
+The runtimeconfig uses workstation non-concurrent GC (`ServerGarbageCollection=false`, `ConcurrentGarbageCollection=false`) for small hosts. Cap the heap with `DOTNET_GCHeapHardLimit` or `System.GC.HeapHardLimit`; this project does not set a limit itself.
 
 悔棋只在人机对局仍在进行时可用（AI 思考中返回 409，对局结束或没有可退的着法返回 400）。`POST /api/rooms/{id}/join` 只能把空位加入为 `human` 或 `bot`。
 
