@@ -15,7 +15,13 @@ public sealed class PaymentOptions
     public long PriceSompi { get; set; } = 100_000_000;
     public int MinConfirmations { get; set; } = 10;
     public int SignatureMaxAgeSeconds { get; set; } = 600;
+    /// <summary>Unpaid (pending_auth / pending_payment) sessions older than this can no longer be signed or paid (410).</summary>
     public int SessionTtlMinutes { get; set; } = 60;
+    /// <summary>Per-client-IP fixed-window limits (requests per minute) on POST /api/continue/*. 0 disables.</summary>
+    public int CreatePerMinute { get; set; } = 30;
+    public int ActionPerMinute { get; set; } = 120;
+    /// <summary>Minimum seconds between Kaspa REST lookups for one session (protects the upstream API quota).</summary>
+    public int PaymentMinIntervalSeconds { get; set; } = 2;
     /// <summary>Development-only switch for automated tests. Never enable in production.</summary>
     public bool TestMode { get; set; }
 
@@ -54,22 +60,51 @@ public sealed class KaspaPaymentVerifier : IPaymentVerifier
 
     public async Task<PaymentCheck> VerifyAsync(string txid, string payerAddress, CancellationToken ct = default)
     {
+        // Fail closed: any transport / parsing problem leaves the session unpaid (never activates).
+        try
+        {
+            return await VerifyCoreAsync(txid, payerAddress, ct);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            return PaymentCheck.Wait("Kaspa API 超时，请稍后重试 / Kaspa API timeout", 0, 0);
+        }
+        catch (HttpRequestException)
+        {
+            return PaymentCheck.Wait("Kaspa API 暂不可用，请稍后重试 / Kaspa API unavailable", 0, 0);
+        }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException or FormatException or OverflowException)
+        {
+            return PaymentCheck.Wait("Kaspa API 返回了无法解析的数据 / malformed Kaspa API response", 0, 0);
+        }
+    }
+
+    private async Task<PaymentCheck> VerifyCoreAsync(string txid, string payerAddress, CancellationToken ct)
+    {
         if (!IsTxid(txid))
             return PaymentCheck.Fail("txid 格式无效（64 位十六进制） / invalid txid");
+        txid = txid.ToLowerInvariant();
         string baseUrl = _options.ApiBaseUrl.TrimEnd('/');
         string payTo = _options.PayToAddress.Trim().ToLowerInvariant();
         string payer = payerAddress.Trim().ToLowerInvariant();
 
         JsonElement tx;
         using (var resp = await _http.GetAsync(
-            $"{baseUrl}/transactions/{txid.ToLowerInvariant()}?inputs=true&outputs=true&resolve_previous_outpoints=light", ct))
+            $"{baseUrl}/transactions/{txid}?inputs=true&outputs=true&resolve_previous_outpoints=light", ct))
         {
             if (resp.StatusCode == HttpStatusCode.NotFound)
                 return PaymentCheck.Wait("交易尚未被索引，请稍后重试 / transaction not found yet", 0, 0);
             if (!resp.IsSuccessStatusCode)
                 return PaymentCheck.Wait($"Kaspa API 暂不可用 ({(int)resp.StatusCode})", 0, 0);
-            tx = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct)).RootElement.Clone();
+            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+                return PaymentCheck.Wait("Kaspa API 返回了无法解析的数据 / malformed Kaspa API response", 0, 0);
+            tx = doc.RootElement.Clone();
         }
+
+        // The API must answer for the transaction we asked about.
+        if (Str(tx, "transaction_id") is { } echoed && !echoed.Equals(txid, StringComparison.OrdinalIgnoreCase))
+            return PaymentCheck.Fail("接口返回的交易与请求不符 / transaction id mismatch");
 
         long paid = 0;
         if (tx.TryGetProperty("outputs", out var outputs) && outputs.ValueKind == JsonValueKind.Array)
@@ -77,8 +112,12 @@ public sealed class KaspaPaymentVerifier : IPaymentVerifier
             foreach (var o in outputs.EnumerateArray())
             {
                 string? addr = Str(o, "script_public_key_address");
-                if (addr != null && addr.Equals(payTo, StringComparison.OrdinalIgnoreCase))
-                    paid += Long(o, "amount");
+                if (addr != null && addr.Trim().Equals(payTo, StringComparison.OrdinalIgnoreCase))
+                {
+                    long amount = Long(o, "amount");
+                    if (amount > 0)
+                        paid = checked(paid + amount);
+                }
             }
         }
         if (paid == 0)
@@ -86,12 +125,23 @@ public sealed class KaspaPaymentVerifier : IPaymentVerifier
         if (paid < _options.PriceSompi)
             return PaymentCheck.Fail($"金额不足：{paid} sompi < {_options.PriceSompi} sompi / amount too low");
 
+        // Payer == signer. Fail closed: every input must be resolved and belong to the signed address.
+        // (A missing/unresolved input list would otherwise let anyone claim somebody else's public payment.)
         var inputs = new List<string>();
+        bool unresolved = false;
         if (tx.TryGetProperty("inputs", out var ins) && ins.ValueKind == JsonValueKind.Array)
+        {
             foreach (var i in ins.EnumerateArray())
-                if (Str(i, "previous_outpoint_address") is { } a)
-                    inputs.Add(a.ToLowerInvariant());
-        if (inputs.Count > 0 && !inputs.Contains(payer))
+            {
+                if (Str(i, "previous_outpoint_address") is { Length: > 0 } a)
+                    inputs.Add(a.Trim().ToLowerInvariant());
+                else
+                    unresolved = true;
+            }
+        }
+        if (inputs.Count == 0 || unresolved)
+            return PaymentCheck.Fail("无法确认付款输入地址，已拒绝 / cannot resolve the payer's input addresses (rejected)");
+        if (inputs.Any(a => a != payer))
             return PaymentCheck.Fail("付款输入地址与已签名地址不一致 / inputs not from the signed address");
 
         bool accepted = tx.TryGetProperty("is_accepted", out var acc) && acc.ValueKind == JsonValueKind.True;
@@ -104,11 +154,11 @@ public sealed class KaspaPaymentVerifier : IPaymentVerifier
         {
             if (!resp.IsSuccessStatusCode)
                 return PaymentCheck.Wait("无法获取当前 blue score", paid, 0);
-            var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct)).RootElement;
-            virtualScore = Long(doc, "blueScore");
+            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
+            virtualScore = doc.RootElement.ValueKind == JsonValueKind.Object ? Long(doc.RootElement, "blueScore") : 0;
         }
         long conf = Math.Max(0, virtualScore - acceptingScore);
-        if (conf < _options.MinConfirmations)
+        if (conf < Math.Max(1, _options.MinConfirmations))
             return PaymentCheck.Wait($"确认数不足：{conf}/{_options.MinConfirmations}", paid, conf);
 
         return new PaymentCheck(true, false, null, paid, conf, inputs.ToArray());
@@ -123,8 +173,10 @@ public sealed class KaspaPaymentVerifier : IPaymentVerifier
             return 0;
         return v.ValueKind switch
         {
-            JsonValueKind.Number => v.GetInt64(),
-            JsonValueKind.String when long.TryParse(v.GetString(), out long l) => l,
+            JsonValueKind.Number when v.TryGetInt64(out long n) => n,
+            // Floats / exponents (e.g. 1e8, 100000000.0): exact whole numbers only, otherwise 0 (= not paid).
+            JsonValueKind.Number when v.TryGetDecimal(out decimal d) && d == decimal.Truncate(d) && d is >= 0 and <= long.MaxValue => (long)d,
+            JsonValueKind.String when long.TryParse(v.GetString(), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out long l) => l,
             _ => 0,
         };
     }
