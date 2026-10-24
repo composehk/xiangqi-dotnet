@@ -66,6 +66,10 @@ public sealed class ArenaOptions
     public int RoomIdleMinutes { get; set; } = 60;
     public int FinishedRoomMinutes { get; set; } = 10;
     public int SweepIntervalSeconds { get; set; } = 60;
+    /// <summary>Per client IP, POST /api/rooms and POST /api/games/vs-ai. 0 or less disables.</summary>
+    public int CreatePerMinute { get; set; } = 20;
+    /// <summary>Per client IP, POST /api/rooms/{id}/moves and /join. 0 or less disables.</summary>
+    public int ActionPerMinute { get; set; } = 240;
 }
 
 /// <summary>

@@ -34,8 +34,9 @@ builder.Services.AddCors(options =>
 
 builder.Services.AddSignalR();
 
-// Rate limiting for the paid-continue API: per client IP, fixed one-minute window.
-// (POST only; reads and the free vs-AI mode are not limited here.)
+// Rate limiting: per client IP, fixed one-minute window, POST only.
+// Paid continue keeps its own partitions. Anonymous room create / vs-AI and room moves / join
+// use ArenaOptions (0 or less disables that partition). Reads are not limited.
 builder.Services.AddRateLimiter(o =>
 {
     o.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
@@ -51,22 +52,50 @@ builder.Services.AddRateLimiter(o =>
     };
     o.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(ctx =>
     {
-        var limits = ctx.RequestServices.GetRequiredService<Xiangqi.Server.Kaspa.PaymentOptions>();
         var path = ctx.Request.Path;
-        if (!HttpMethods.IsPost(ctx.Request.Method) || !path.StartsWithSegments("/api/continue"))
-            return RateLimitPartition.GetNoLimiter("none");
-        bool create = path.Value is "/api/continue/sessions" or "/api/continue/sessions/";
-        int permits = create ? limits.CreatePerMinute : limits.ActionPerMinute;
-        if (permits <= 0)
-            return RateLimitPartition.GetNoLimiter("off");
-        string ip = ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown";
-        return RateLimitPartition.GetFixedWindowLimiter($"{(create ? "c" : "a")}:{ip}", _ => new FixedWindowRateLimiterOptions
+        if (HttpMethods.IsPost(ctx.Request.Method) && path.StartsWithSegments("/api/continue"))
         {
-            PermitLimit = permits,
-            Window = TimeSpan.FromMinutes(1),
-            QueueLimit = 0,
-            AutoReplenishment = true,
-        });
+            var limits = ctx.RequestServices.GetRequiredService<Xiangqi.Server.Kaspa.PaymentOptions>();
+            bool create = path.Value is "/api/continue/sessions" or "/api/continue/sessions/";
+            int permits = create ? limits.CreatePerMinute : limits.ActionPerMinute;
+            if (permits <= 0)
+                return RateLimitPartition.GetNoLimiter("off");
+            string ip = ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+            return RateLimitPartition.GetFixedWindowLimiter($"{(create ? "c" : "a")}:{ip}", _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = permits,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+                AutoReplenishment = true,
+            });
+        }
+
+        if (HttpMethods.IsPost(ctx.Request.Method))
+        {
+            string normalized = path.Value ?? "";
+            if (normalized.Length > 1 && normalized.EndsWith('/'))
+                normalized = normalized.TrimEnd('/');
+            bool createRoom = normalized is "/api/rooms" or "/api/games/vs-ai";
+            bool roomAction = normalized.StartsWith("/api/rooms/", StringComparison.Ordinal)
+                && (normalized.EndsWith("/moves", StringComparison.Ordinal) || normalized.EndsWith("/join", StringComparison.Ordinal));
+            if (createRoom || roomAction)
+            {
+                var arena = ctx.RequestServices.GetRequiredService<Microsoft.Extensions.Options.IOptions<ArenaOptions>>().Value;
+                int permits = createRoom ? arena.CreatePerMinute : arena.ActionPerMinute;
+                if (permits <= 0)
+                    return RateLimitPartition.GetNoLimiter("off");
+                string ip = ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+                return RateLimitPartition.GetFixedWindowLimiter($"{(createRoom ? "rc" : "ra")}:{ip}", _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = permits,
+                    Window = TimeSpan.FromMinutes(1),
+                    QueueLimit = 0,
+                    AutoReplenishment = true,
+                });
+            }
+        }
+
+        return RateLimitPartition.GetNoLimiter("none");
     });
 });
 
@@ -159,11 +188,11 @@ if (honorForwarded)
 
 app.UseCors("open");
 
-// Request-size cap for the paid-continue API (a record + moves fits in a few KB).
+// Request-size cap for non-GET /api calls (a record + moves fits in a few KB).
 const long MaxContinueBody = 64 * 1024;
 app.Use(async (ctx, next) =>
 {
-    if (ctx.Request.Path.StartsWithSegments("/api/continue") && !HttpMethods.IsGet(ctx.Request.Method))
+    if (ctx.Request.Path.StartsWithSegments("/api") && !HttpMethods.IsGet(ctx.Request.Method))
     {
         if (ctx.Request.ContentLength > MaxContinueBody)
         {
