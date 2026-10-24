@@ -56,6 +56,8 @@ internal sealed class Room
     public SemaphoreSlim PublishLock { get; } = new(1, 1);
     public bool AiRunning { get; set; }
     public long Version { get; set; }
+    /// <summary>UTC time the game first became over. Null while the game is ongoing.</summary>
+    public DateTimeOffset? FinishedAt { get; set; }
 }
 
 /// <summary>Limits for the anonymous public arena. Bound from configuration section "Arena".</summary>
@@ -70,6 +72,8 @@ public sealed class ArenaOptions
     public int CreatePerMinute { get; set; } = 20;
     /// <summary>Per client IP, POST /api/rooms/{id}/moves, /join, /resign, and /undo. 0 or less disables.</summary>
     public int ActionPerMinute { get; set; } = 240;
+    /// <summary>Seconds a finished public room stays in GET /api/rooms. 0 drops it on the next list.</summary>
+    public int FinishedLobbyGraceSeconds { get; set; } = 30;
 }
 
 /// <summary>
@@ -83,14 +87,20 @@ public sealed class ArenaService : IHostedService
     private readonly IHubContext<GameHub> _hub;
     private readonly ILogger<ArenaService> _logger;
     private readonly ArenaOptions _options;
+    private readonly TimeSpan _finishedLobbyGrace;
     private readonly CancellationTokenSource _shutdown = new();
     private Task? _sweepLoop;
+
+    /// <summary>Default time a finished room remains in the lobby list.</summary>
+    internal static readonly TimeSpan FinishedLobbyGrace = TimeSpan.FromSeconds(30);
 
     public ArenaService(IHubContext<GameHub> hub, ILogger<ArenaService> logger, IOptions<ArenaOptions> options)
     {
         _hub = hub;
         _logger = logger;
         _options = options.Value;
+        int seconds = _options.FinishedLobbyGraceSeconds;
+        _finishedLobbyGrace = seconds < 0 ? FinishedLobbyGrace : TimeSpan.FromSeconds(seconds);
     }
 
     public static string GroupName(Guid id) => "room:" + id.ToString("D");
@@ -180,7 +190,7 @@ public sealed class ArenaService : IHostedService
         {
             lock (room.Gate)
             {
-                if (!room.IsPublic || IsExpiredLocked(room, now))
+                if (!room.IsPublic || IsExpiredLocked(room, now) || PastLobbyGraceLocked(room, now))
                     continue;
 
                 list.Add(new RoomSummaryDto(
@@ -247,6 +257,7 @@ public sealed class ArenaService : IHostedService
 
             room.Game.MakeMove(move);
             room.LastActivity = DateTimeOffset.UtcNow;
+            NoteFinishedLocked(room);
             version = ++room.Version;
             state = ProjectLocked(room);
         }
@@ -312,6 +323,7 @@ public sealed class ArenaService : IHostedService
 
             room.Game.Resign(loser.Value);
             room.LastActivity = DateTimeOffset.UtcNow;
+            NoteFinishedLocked(room);
             version = ++room.Version;
             state = ProjectLocked(room);
         }
@@ -408,6 +420,20 @@ public sealed class ArenaService : IHostedService
         return idle > TimeSpan.FromMinutes(_options.FinishedRoomMinutes);
     }
 
+    private bool PastLobbyGraceLocked(Room room, DateTimeOffset now)
+    {
+        if (room.FinishedAt is not DateTimeOffset finished)
+            return false;
+        return now - finished > _finishedLobbyGrace;
+    }
+
+    /// <summary>Stamps <see cref="Room.FinishedAt"/> the first time the game is no longer ongoing.</summary>
+    private static void NoteFinishedLocked(Room room)
+    {
+        if (room.FinishedAt is null && room.Game.Status != GameStatus.Ongoing)
+            room.FinishedAt = DateTimeOffset.UtcNow;
+    }
+
     private CreateRoomResponseDto AddRoom(string? requestedName, SeatKind redKind, SeatKind blackKind, Difficulty difficulty, bool isPublic)
     {
         if (_rooms.Count >= _options.MaxRooms)
@@ -481,6 +507,7 @@ public sealed class ArenaService : IHostedService
                 {
                     room.Game.MakeMove(result.BestMove);
                     room.LastActivity = DateTimeOffset.UtcNow;
+                    NoteFinishedLocked(room);
                     version = ++room.Version;
                     played = true;
                     _logger.LogInformation("AI played {Move} in room {RoomId}", result.BestMove, room.Id);

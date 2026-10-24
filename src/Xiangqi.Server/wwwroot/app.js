@@ -291,6 +291,7 @@ function render() {
   paintStatus();
   paintLobbyActive();
   updateGameActions();
+  updateLeaveSpectate();
 }
 
 function onBoardClick(event) {
@@ -403,7 +404,10 @@ function syncSetupFromState() {
   const black = state.seats.black;
   const ai = red && red.kind === "ai" ? red : black && black.kind === "ai" ? black : null;
   if (diffEl && ai && ai.difficulty) diffEl.value = ai.difficulty;
-  if (colorEl && session.token && (session.color === "red" || session.color === "black"))
+  if (!colorEl) return;
+  if (!session.token)
+    colorEl.value = "red";
+  else if (session.color === "red" || session.color === "black")
     colorEl.value = session.color;
 }
 
@@ -513,6 +517,77 @@ function updateGameActions() {
   undoBtn.hidden = !aiGame || !ongoing;
   const aiThinking = ongoing && state.sideToMove !== session.color;
   undoBtn.disabled = busy || !aiGame || !ongoing || aiThinking;
+}
+
+function isSpectating() {
+  return !preview && !session.cont && !session.token && !!session.roomId && !!state.id;
+}
+
+function updateLeaveSpectate() {
+  const button = document.getElementById("leaveSpectateBtn");
+  if (!button) return;
+  button.hidden = !isSpectating();
+}
+
+function emptyBoardState() {
+  return {
+    id: null,
+    name: "",
+    board: START_ROWS,
+    sideToMove: "red",
+    status: "ongoing",
+    inCheck: false,
+    lastMove: null,
+    history: [],
+    seats: null,
+    fen: ""
+  };
+}
+
+function forgetStoredRoom(roomId) {
+  try { sessionStorage.removeItem(SESSION_KEY); }
+  catch { /* ignore */ }
+  scrubStore(sessionStorage, roomId);
+  scrubStore(localStorage, roomId);
+}
+
+function scrubStore(store, roomId) {
+  if (!store || !roomId) return;
+  try {
+    const drop = [];
+    for (let i = 0; i < store.length; i++) {
+      const key = store.key(i);
+      if (!key) continue;
+      const value = store.getItem(key);
+      if (value && value.indexOf(roomId) >= 0) drop.push(key);
+    }
+    for (const key of drop) store.removeItem(key);
+  } catch { /* private mode or blocked storage */ }
+}
+
+async function leaveSpectate() {
+  const roomId = session.roomId;
+  stopPoll();
+  session = { roomId: null, token: null, color: null, spectating: false };
+  forgetStoredRoom(roomId);
+  const conn = connection;
+  joinedRoom = null;
+  if (conn) {
+    try {
+      if (roomId && typeof signalR !== "undefined" && conn.state === signalR.HubConnectionState.Connected)
+        await conn.invoke("LeaveRoom", roomId);
+      await conn.stop();
+    } catch (err) {
+      console.warn(err);
+    }
+  }
+  connection = null;
+  state = emptyBoardState();
+  preview = true;
+  clearMoveBookkeeping();
+  setConn("idle");
+  render();
+  await loadLobby();
 }
 
 function clearMoveBookkeeping() {
@@ -811,6 +886,8 @@ async function init() {
   document.getElementById("resignBtn").addEventListener("click", function () { void resignGame(); });
   document.getElementById("undoBtn").addEventListener("click", function () { void undoMove(); });
   document.getElementById("refresh").addEventListener("click", function () { void loadLobby(); });
+  const leaveBtn = document.getElementById("leaveSpectateBtn");
+  if (leaveBtn) leaveBtn.addEventListener("click", function () { void leaveSpectate(); });
   try { await restore(); }
   catch (err) { console.warn(err); }
   await loadLobby();
