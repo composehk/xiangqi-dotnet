@@ -249,6 +249,7 @@ public class ContinueSecurityTests : IClassFixture<WebApplicationFactory<Program
         clock.Advance(TimeSpan.FromMinutes(61));
         Assert.Equal("expired", (await ContinueHarness.GetSession(c, pendingAuth)).Body.GetProperty("status").GetString());
         Assert.Equal(HttpStatusCode.Gone, (await ContinueHarness.Auth(c, pendingAuth, ts: clock.UnixSeconds)).Status);
+        clock.Advance(TimeSpan.FromHours(25)); // past the 24 h recovery grace window (see ContinueRecoveryTests)
         Assert.Equal(HttpStatusCode.Gone, (await ContinueHarness.Pay(c, pendingPay, new string('2', 64))).Status);
         Assert.Equal(HttpStatusCode.PaymentRequired, (await ContinueHarness.Move(c, pendingPay, "马二进三")).Status);
 

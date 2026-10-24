@@ -17,6 +17,8 @@ public sealed class PaymentOptions
     public int SignatureMaxAgeSeconds { get; set; } = 600;
     /// <summary>Unpaid (pending_auth / pending_payment) sessions older than this can no longer be signed or paid (410).</summary>
     public int SessionTtlMinutes { get; set; } = 60;
+    /// <summary>Extra minutes after <see cref="SessionTtlMinutes"/> in which a signed pending_payment session may still submit its txid. 0 disables recovery.</summary>
+    public int ExpiredPaymentGraceMinutes { get; set; } = 1440;
     /// <summary>Per-client-IP fixed-window limits (requests per minute) on POST /api/continue/*. 0 disables.</summary>
     public int CreatePerMinute { get; set; } = 30;
     public int ActionPerMinute { get; set; } = 120;
@@ -140,9 +142,9 @@ public sealed class KaspaPaymentVerifier : IPaymentVerifier
             }
         }
         if (inputs.Count == 0 || unresolved)
-            return PaymentCheck.Fail("无法确认付款输入地址，已拒绝 / cannot resolve the payer's input addresses (rejected)");
+            return PaymentCheck.Fail("无法确认付款输入地址，已拒绝。请只用签名地址的 UTXO、单笔支付 / cannot resolve the payer's input addresses (rejected); pay from the signed address in a single transaction");
         if (inputs.Any(a => a != payer))
-            return PaymentCheck.Fail("付款输入地址与已签名地址不一致 / inputs not from the signed address");
+            return PaymentCheck.Fail("付款交易的输入必须全部来自已签名地址，检测到其他地址的输入；请只用签名地址的 UTXO 单笔支付，不要混用其他地址 / all inputs must come from the signed address; this transaction spends inputs from another address — pay from the signed address only, in a single transaction");
 
         bool accepted = tx.TryGetProperty("is_accepted", out var acc) && acc.ValueKind == JsonValueKind.True;
         long acceptingScore = Long(tx, "accepting_block_blue_score");

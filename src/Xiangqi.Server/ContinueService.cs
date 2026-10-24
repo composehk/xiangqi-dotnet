@@ -195,7 +195,7 @@ public sealed class ContinueService
                 return (200, Project(s));
             if (s.Status != "pending_payment" || string.IsNullOrEmpty(s.Address))
                 throw new ApiException(409, "请先完成钱包签名 / sign with your wallet first");
-            RequireNotExpired(s);
+            RequirePaymentWindow(s);
             string txid = (request?.Txid ?? "").Trim().ToLowerInvariant();
             if (!KaspaPaymentVerifier.IsTxid(txid))
                 throw new ApiException(400, "txid 格式无效（64 位十六进制） / invalid txid");
@@ -329,6 +329,21 @@ public sealed class ContinueService
     {
         if (IsExpired(s))
             throw new ApiException(410, "会话已过期，请重新创建 / session expired, create a new one");
+    }
+
+    /// <summary>
+    /// Payment-only window. A session still inside SessionTtl is unchanged. After that, a signed
+    /// pending_payment session may submit until CreatedAt + (SessionTtl + grace). Grace 0 keeps the old 410.
+    /// </summary>
+    private void RequirePaymentWindow(ContinueSession s)
+    {
+        if (!IsExpired(s))
+            return;
+        long age = _time.GetUtcNow().ToUnixTimeSeconds() - s.CreatedAt;
+        long limit = ((long)_options.SessionTtlMinutes + _options.ExpiredPaymentGraceMinutes) * 60L;
+        if (s.Status == "pending_payment" && !string.IsNullOrEmpty(s.Address) && age <= limit)
+            return;
+        throw new ApiException(410, "会话已过期，且已超过恢复期。如果您已转账，请保留交易 ID（txid）并联系客服 / session expired beyond the recovery window; if you already paid, keep your txid and contact support");
     }
 
     private void RequireConfigured()
