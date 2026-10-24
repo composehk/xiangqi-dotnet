@@ -86,7 +86,7 @@ public sealed class ContinueService
         }
         catch (Exception ex) when (ex is FormatException or ArgumentException or InvalidOperationException)
         {
-            throw new ApiException(400, ex.Message);
+            throw new ApiException(400, Bilingual("局面或着法无效", "invalid position or moves", ex.Message));
         }
     }
 
@@ -172,7 +172,7 @@ public sealed class ContinueService
         string message = SignMessage(s.Id, ts);
         var check = KaspaMessageSigner.Verify(request?.Address, message, request?.Signature, _options.Network);
         if (!check.Valid)
-            throw new ApiException(400, check.Error ?? "签名无效");
+            throw new ApiException(400, Bilingual("签名无效", "invalid signature", check.Error));
         s.Address = request!.Address!.Trim().ToLowerInvariant();
         s.Signature = request.Signature!.Trim();
         s.Timestamp = ts;
@@ -218,9 +218,9 @@ public sealed class ContinueService
 
             var result = await _verifier.VerifyAsync(txid, s.Address, ct);
             if (result.Pending)
-                return (202, Project(s, info: result.Error));
+                return (202, Project(s, info: Bilingual("支付验证失败", "payment verification failed", result.Error)));
             if (!result.Ok)
-                throw new ApiException(400, result.Error ?? "支付验证失败");
+                throw new ApiException(400, Bilingual("支付验证失败", "payment verification failed", result.Error));
             var consumed = _store.TryConsumeTxid(s, txid, result.AmountSompi, result.Confirmations, requirePendingPayment: true);
             if (consumed == ConsumeResult.SessionNotPayable)
                 throw new ApiException(409, "会话不可支付 / session is not payable");
@@ -244,6 +244,7 @@ public sealed class ContinueService
 
     public async Task<ContinueSessionDto> PlayAsync(string id, ContinueMoveRequest? request, CancellationToken ct)
     {
+        CleanupIfDue();
         Limit(request?.Token, MaxTokenLength, "token");
         Limit(request?.Move, MaxMoveLength, "move");
         var known = Load(id);
@@ -268,7 +269,7 @@ public sealed class ContinueService
             catch (FormatException)
             {
                 try { move = ChineseNotation.Parse(game.Board, request?.Move ?? ""); }
-                catch (FormatException ex) { throw new ApiException(400, ex.Message); }
+                catch (FormatException ex) { throw new ApiException(400, Bilingual("着法记谱无效", "invalid move notation", ex.Message)); }
             }
             if (!game.Board.IsLegal(move))
                 throw new ApiException(400, $"非法着法 {move} / Illegal move {move}.");
@@ -319,6 +320,31 @@ public sealed class ContinueService
     /// <summary>Session ids are Guid "N" strings: exactly 32 lowercase hex characters.</summary>
     public static bool IsSessionId(string? id) =>
         id is { Length: 32 } && id.All(c => c is (>= '0' and <= '9') or (>= 'a' and <= 'f'));
+
+    /// <summary>
+    /// User-visible "中文 / English". Null detail becomes "<paramref name="zh"/> / <paramref name="en"/>".
+    /// A detail that already has both CJK and Latin text is kept so a bilingual verifier message is not doubled.
+    /// English-only text is prefixed with the Chinese summary. Chinese-only text is followed by the English summary.
+    /// </summary>
+    private static string Bilingual(string zh, string en, string? detail)
+    {
+        if (string.IsNullOrWhiteSpace(detail))
+            return zh + " / " + en;
+        bool cjk = false;
+        bool latin = false;
+        foreach (char c in detail)
+        {
+            if (c is >= '\u4e00' and <= '\u9fff')
+                cjk = true;
+            else if (c is (>= 'A' and <= 'Z') or (>= 'a' and <= 'z'))
+                latin = true;
+        }
+        if (cjk && latin)
+            return detail;
+        if (!cjk)
+            return zh + " / " + detail;
+        return detail + " / " + en;
+    }
 
     private static void Limit(string? value, int max, string name)
     {
