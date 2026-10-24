@@ -28,8 +28,40 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 
 builder.Services.AddCors(options =>
 {
+    static string NormalizeOrigin(string origin) => origin.Trim().TrimEnd('/');
+
+    static bool IsLocalDevOrigin(string origin)
+    {
+        if (!Uri.TryCreate(origin, UriKind.Absolute, out Uri? uri))
+            return false;
+        if (!string.Equals(uri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
+            return false;
+        string host = uri.IdnHost;
+        return host.Equals("localhost", StringComparison.OrdinalIgnoreCase)
+            || host.Equals("127.0.0.1", StringComparison.Ordinal)
+            || host.Equals("::1", StringComparison.Ordinal);
+    }
+
+    bool allowAnyOrigin = builder.Configuration.GetValue("Cors:AllowAnyOrigin", false);
+    string[] configured = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? Array.Empty<string>();
+    var allowedOrigins = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    foreach (string item in configured)
+    {
+        if (!string.IsNullOrWhiteSpace(item))
+            allowedOrigins.Add(NormalizeOrigin(item));
+    }
+
     options.AddPolicy("open", policy =>
-        policy.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod());
+    {
+        if (allowAnyOrigin)
+            policy.AllowAnyOrigin();
+        else
+            policy.SetIsOriginAllowed(origin =>
+                !string.IsNullOrWhiteSpace(origin)
+                && (allowedOrigins.Contains(NormalizeOrigin(origin)) || IsLocalDevOrigin(origin)));
+        policy.AllowAnyHeader().AllowAnyMethod();
+    });
 });
 
 builder.Services.AddSignalR();
