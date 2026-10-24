@@ -16,4 +16,30 @@
     <PackageReference Include="NBitcoin.Secp256k1" Version="3.1.6" />
   </ItemGroup>
 
+  <!--
+    Build stamp for /api/health: short git SHA + UTC build time.
+    SHA precedence: -p:SourceRevisionId=<sha> (CI/Docker) > `git rev-parse` in the repo > "unknown".
+    The SDK folds SourceRevisionId into AssemblyInformationalVersion as "<version>+<sha>".
+  -->
+  <Target Name="StampBuildInfo" BeforeTargets="InitializeSourceControlInformation;GetAssemblyAttributes">
+    <Exec Condition="'$(SourceRevisionId)' == ''" Command="git rev-parse --short=12 HEAD"
+          WorkingDirectory="$(MSBuildProjectDirectory)" ConsoleToMSBuild="true" IgnoreExitCode="true"
+          StandardOutputImportance="low" StandardErrorImportance="low" ContinueOnError="true">
+      <Output TaskParameter="ConsoleOutput" PropertyName="_StampGitSha" />
+    </Exec>
+    <PropertyGroup Condition="'$(SourceRevisionId)' == '' And '$(_StampGitSha)' != ''">
+      <SourceRevisionId>$(_StampGitSha.Trim())</SourceRevisionId>
+    </PropertyGroup>
+    <PropertyGroup>
+      <_StampBuiltAt Condition="'$(BuildTimeUtc)' == ''">$([System.DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"))</_StampBuiltAt>
+      <_StampBuiltAt Condition="'$(BuildTimeUtc)' != ''">$(BuildTimeUtc)</_StampBuiltAt>
+    </PropertyGroup>
+    <ItemGroup>
+      <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+        <_Parameter1>BuiltAt</_Parameter1>
+        <_Parameter2>$(_StampBuiltAt)</_Parameter2>
+      </AssemblyAttribute>
+    </ItemGroup>
+  </Target>
+
 </Project>

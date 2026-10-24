@@ -2,7 +2,7 @@ using Microsoft.AspNetCore.Http;
 
 namespace Xiangqi.Server;
 
-public sealed record HealthDto(string Status);
+public sealed record HealthDto(string Status, string Version, string BuiltAt);
 
 public sealed record ErrorDto(string Error);
 

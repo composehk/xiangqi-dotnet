@@ -59,7 +59,8 @@ app.UseCors("open");
 app.UseDefaultFiles();
 app.UseStaticFiles();
 
-app.MapGet("/api/health", () => Results.Ok(new HealthDto("ok")));
+var buildInfo = BuildInfo.FromAssembly(typeof(Program).Assembly);
+app.MapGet("/api/health", () => Results.Ok(new HealthDto("ok", buildInfo.Version, buildInfo.BuiltAt)));
 
 app.MapGet("/api/rooms", (ArenaService arena) =>
     ApiResults.Of(() => Results.Ok(arena.List())));
