@@ -393,7 +393,13 @@ Body `{ "token": "..." }`. `resign`: the holder of either seat's token resigns a
 | `Forwarded:KnownProxies` / `KnownNetworks` | `[]` | 仅当列出反向代理时才信任 `X-Forwarded-*`；默认直连，不信任。Trust `X-Forwarded-*` only from listed proxies; default is direct, untrusted. |
 | `Payment:ExpiredPaymentGraceMinutes` | `1440` | 会话过期后仍可提交已完成的付款的宽限期（验证规则不变）。Grace window after a session expires in which an already-made payment can still be submitted (verification rules unchanged). |
 
-超过限速返回 `429`，带 `Retry-After` 和中英文 JSON。Rate-limited calls return `429` with `Retry-After` and a bilingual JSON error.
+超过限速返回 `429`，带 `Retry-After` 和中英文 JSON。`Retry-After` 与正文里的秒数相同，是当前一分钟窗口还剩多少秒（最少 1，最多 60），不是固定的 60。没有匹配到的 `/api` 路径返回 404 JSON「接口不存在 / Not found.」；方法不被允许时返回 405 JSON「不支持的请求方法 / Method not allowed.」，并保留 `Allow` 头。接口自己已经写出的正文（例如未知房间的 404）不会被替换。
+
+Rate-limited calls return `429` with `Retry-After` and a bilingual JSON error. `Retry-After` matches the seconds in the body: the time left in the current one-minute window (at least 1, at most 60), not a fixed 60. An unknown `/api` path returns 404 JSON "接口不存在 / Not found." A method the route does not allow returns 405 JSON "不支持的请求方法 / Method not allowed." and keeps the `Allow` header. A body the handler already wrote (for example the unknown-room 404) is left unchanged.
+
+公共大厅：已结束的房间在结束 30 秒后从 `GET /api/rooms` 消失（`Arena:FinishedLobbyGraceSeconds`，默认 30），`GET /api/rooms/{id}` 仍可查看。观战时页面有「离开观战 Leave spectating」按钮。`Csp:ConnectSrcExtra`（可选，空格分隔）可在 CSP `connect-src` 里追加来源；`connect-src` 默认由请求的主机名生成。
+
+Lobby: a finished room leaves `GET /api/rooms` 30 seconds after it ends (`Arena:FinishedLobbyGraceSeconds`, default 30); `GET /api/rooms/{id}` still works. While spectating, the page shows a "离开观战 Leave spectating" button. Optional `Csp:ConnectSrcExtra` (space separated) appends sources to the CSP `connect-src`, which is otherwise derived from the request host.
 
 ## 外部 Bot 协议 External bot protocol
 
@@ -406,9 +412,9 @@ Body `{ "token": "..." }`. `resign`: the holder of either seat's token resigns a
 4. `400` 表示着法非法或对局已结束，`403` 表示还没轮到这个令牌，`404` 表示房间不存在。不要替 `ai` 座位走子，服务器会自己走。
    `400` means illegal or the game is over, `403` means it is not this token's turn, `404` means the room is gone. Do not move for an `ai` seat; the server plays those turns.
 
-浏览器里的跨源调用默认只允许本机（localhost）和 `Cors:AllowedOrigins` 里列出的来源，无凭据；`Cors:AllowAnyOrigin=true` 可重新放开（不建议公网使用）。令牌放在 JSON 里，不要放在 URL 上。
+浏览器里的跨源调用默认只允许本机（localhost）和 `Cors:AllowedOrigins` 里列出的来源，无凭据；`Cors:AllowAnyOrigin=true` 可重新放开（不建议公网使用）。令牌放在 JSON 里，不要放在 URL 上。`/hub/game`（negotiate 和 WebSocket）如果带了 `Origin`，只接受同源、本机开发来源，或与上面同一份允许列表；不允许时返回 403 JSON「来源不被允许 / Origin not allowed.」。没有 `Origin` 的非浏览器客户端可以连接。
 
-Cross-origin browser calls are allowed only from localhost and the origins listed in `Cors:AllowedOrigins` (no credentials); `Cors:AllowAnyOrigin=true` re-opens it (not recommended on the public internet). Send the token in JSON, not in the URL. Non-browser bots are not affected by CORS.
+Cross-origin browser calls are allowed only from localhost and the origins listed in `Cors:AllowedOrigins` (no credentials); `Cors:AllowAnyOrigin=true` re-opens it (not recommended on the public internet). Send the token in JSON, not in the URL. Non-browser bots are not affected by CORS. `/hub/game` (negotiate and the WebSocket) accepts an `Origin` only when it is same-origin, a local dev origin, or on that same allowlist; otherwise it returns 403 JSON "来源不被允许 / Origin not allowed." Clients that omit `Origin` may connect.
 
 ```javascript
 const connection = new signalR.HubConnectionBuilder()
