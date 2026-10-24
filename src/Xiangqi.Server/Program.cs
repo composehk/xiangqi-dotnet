@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Text.Json;
 using System.Threading.RateLimiting;
@@ -26,40 +27,43 @@ builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.PropertyNameCaseInsensitive = true;
 });
 
+static string NormalizeOrigin(string origin) => origin.Trim().TrimEnd('/');
+
+static bool IsLocalDevOrigin(string origin)
+{
+    if (!Uri.TryCreate(origin, UriKind.Absolute, out Uri? uri))
+        return false;
+    if (!string.Equals(uri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
+        && !string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
+        return false;
+    string host = uri.IdnHost;
+    return host.Equals("localhost", StringComparison.OrdinalIgnoreCase)
+        || host.Equals("127.0.0.1", StringComparison.Ordinal)
+        || host.Equals("::1", StringComparison.Ordinal);
+}
+
+bool allowAnyOrigin = builder.Configuration.GetValue("Cors:AllowAnyOrigin", false);
+string[] configuredOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? Array.Empty<string>();
+var allowedOrigins = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+foreach (string item in configuredOrigins)
+{
+    if (!string.IsNullOrWhiteSpace(item))
+        allowedOrigins.Add(NormalizeOrigin(item));
+}
+
+// Shared by the "open" CORS policy and the /hub/game Origin check.
+bool IsAllowlistedOrigin(string? origin) =>
+    !string.IsNullOrWhiteSpace(origin)
+    && (allowedOrigins.Contains(NormalizeOrigin(origin)) || IsLocalDevOrigin(origin));
+
 builder.Services.AddCors(options =>
 {
-    static string NormalizeOrigin(string origin) => origin.Trim().TrimEnd('/');
-
-    static bool IsLocalDevOrigin(string origin)
-    {
-        if (!Uri.TryCreate(origin, UriKind.Absolute, out Uri? uri))
-            return false;
-        if (!string.Equals(uri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
-            && !string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
-            return false;
-        string host = uri.IdnHost;
-        return host.Equals("localhost", StringComparison.OrdinalIgnoreCase)
-            || host.Equals("127.0.0.1", StringComparison.Ordinal)
-            || host.Equals("::1", StringComparison.Ordinal);
-    }
-
-    bool allowAnyOrigin = builder.Configuration.GetValue("Cors:AllowAnyOrigin", false);
-    string[] configured = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? Array.Empty<string>();
-    var allowedOrigins = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-    foreach (string item in configured)
-    {
-        if (!string.IsNullOrWhiteSpace(item))
-            allowedOrigins.Add(NormalizeOrigin(item));
-    }
-
     options.AddPolicy("open", policy =>
     {
         if (allowAnyOrigin)
             policy.AllowAnyOrigin();
         else
-            policy.SetIsOriginAllowed(origin =>
-                !string.IsNullOrWhiteSpace(origin)
-                && (allowedOrigins.Contains(NormalizeOrigin(origin)) || IsLocalDevOrigin(origin)));
+            policy.SetIsOriginAllowed(origin => IsAllowlistedOrigin(origin));
         policy.AllowAnyHeader().AllowAnyMethod();
     });
 });
@@ -69,17 +73,64 @@ builder.Services.AddSignalR();
 // Rate limiting: per client IP, fixed one-minute window, POST only.
 // Paid continue keeps its own partitions. Anonymous room create / vs-AI and room moves / join
 // use ArenaOptions (0 or less disables that partition). Reads are not limited.
+// FixedWindow's RetryAfter metadata is the full window, not the time left.
+// windowStarts records, per partition key, when the current window was first seen.
+TimeSpan rateWindow = TimeSpan.FromMinutes(1);
+int rateWindowSeconds = (int)rateWindow.TotalSeconds;
+var windowStarts = new ConcurrentDictionary<string, DateTime>(StringComparer.Ordinal);
+
+// null when this request is not counted against a fixed window (same rules as the limiter below).
+static (string Key, int Permits)? ClassifyRateLimit(HttpContext ctx)
+{
+    var path = ctx.Request.Path;
+    if (!HttpMethods.IsPost(ctx.Request.Method))
+        return null;
+
+    if (path.StartsWithSegments("/api/continue"))
+    {
+        var limits = ctx.RequestServices.GetRequiredService<Xiangqi.Server.Kaspa.PaymentOptions>();
+        bool create = path.Value is "/api/continue/sessions" or "/api/continue/sessions/";
+        int permits = create ? limits.CreatePerMinute : limits.ActionPerMinute;
+        if (permits <= 0)
+            return null;
+        string ip = ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+        return ($"{(create ? "c" : "a")}:{ip}", permits);
+    }
+
+    string normalized = path.Value ?? "";
+    if (normalized.Length > 1 && normalized.EndsWith('/'))
+        normalized = normalized.TrimEnd('/');
+    bool createRoom = normalized is "/api/rooms" or "/api/games/vs-ai";
+    bool roomAction = normalized.StartsWith("/api/rooms/", StringComparison.Ordinal)
+        && (normalized.EndsWith("/moves", StringComparison.Ordinal)
+            || normalized.EndsWith("/join", StringComparison.Ordinal)
+            || normalized.EndsWith("/resign", StringComparison.Ordinal)
+            || normalized.EndsWith("/undo", StringComparison.Ordinal));
+    if (!createRoom && !roomAction)
+        return null;
+
+    var arena = ctx.RequestServices.GetRequiredService<Microsoft.Extensions.Options.IOptions<ArenaOptions>>().Value;
+    int arenaPermits = createRoom ? arena.CreatePerMinute : arena.ActionPerMinute;
+    if (arenaPermits <= 0)
+        return null;
+    string clientIp = ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+    return ($"{(createRoom ? "rc" : "ra")}:{clientIp}", arenaPermits);
+}
+
 builder.Services.AddRateLimiter(o =>
 {
-    // One window length for every fixed-window partition and for the Retry-After fallback.
-    TimeSpan rateWindow = TimeSpan.FromMinutes(1);
-    int rateWindowSeconds = (int)rateWindow.TotalSeconds;
     o.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
     o.OnRejected = async (context, ct) =>
     {
         int retryAfter = rateWindowSeconds;
-        if (context.Lease.TryGetMetadata(MetadataName.RetryAfter, out TimeSpan wait))
-            retryAfter = Math.Clamp((int)Math.Ceiling(wait.TotalSeconds), 1, 3600);
+        (string Key, int Permits)? partition = ClassifyRateLimit(context.HttpContext);
+        if (partition is not null && windowStarts.TryGetValue(partition.Value.Key, out DateTime started))
+        {
+            double secondsLeft = (started + rateWindow - DateTime.UtcNow).TotalSeconds;
+            retryAfter = (int)Math.Ceiling(secondsLeft);
+        }
+        // Never advertise a longer wait than the window, and never 0.
+        retryAfter = Math.Clamp(retryAfter, 1, rateWindowSeconds);
         context.HttpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
         context.HttpContext.Response.Headers.RetryAfter = retryAfter.ToString(System.Globalization.CultureInfo.InvariantCulture);
         await context.HttpContext.Response.WriteAsJsonAsync(
@@ -87,53 +138,17 @@ builder.Services.AddRateLimiter(o =>
     };
     o.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(ctx =>
     {
-        var path = ctx.Request.Path;
-        if (HttpMethods.IsPost(ctx.Request.Method) && path.StartsWithSegments("/api/continue"))
+        (string Key, int Permits)? partition = ClassifyRateLimit(ctx);
+        if (partition is null)
+            return RateLimitPartition.GetNoLimiter("none");
+        int permits = partition.Value.Permits;
+        return RateLimitPartition.GetFixedWindowLimiter(partition.Value.Key, _ => new FixedWindowRateLimiterOptions
         {
-            var limits = ctx.RequestServices.GetRequiredService<Xiangqi.Server.Kaspa.PaymentOptions>();
-            bool create = path.Value is "/api/continue/sessions" or "/api/continue/sessions/";
-            int permits = create ? limits.CreatePerMinute : limits.ActionPerMinute;
-            if (permits <= 0)
-                return RateLimitPartition.GetNoLimiter("off");
-            string ip = ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown";
-            return RateLimitPartition.GetFixedWindowLimiter($"{(create ? "c" : "a")}:{ip}", _ => new FixedWindowRateLimiterOptions
-            {
-                PermitLimit = permits,
-                Window = rateWindow,
-                QueueLimit = 0,
-                AutoReplenishment = true,
-            });
-        }
-
-        if (HttpMethods.IsPost(ctx.Request.Method))
-        {
-            string normalized = path.Value ?? "";
-            if (normalized.Length > 1 && normalized.EndsWith('/'))
-                normalized = normalized.TrimEnd('/');
-            bool createRoom = normalized is "/api/rooms" or "/api/games/vs-ai";
-            bool roomAction = normalized.StartsWith("/api/rooms/", StringComparison.Ordinal)
-                && (normalized.EndsWith("/moves", StringComparison.Ordinal)
-                    || normalized.EndsWith("/join", StringComparison.Ordinal)
-                    || normalized.EndsWith("/resign", StringComparison.Ordinal)
-                    || normalized.EndsWith("/undo", StringComparison.Ordinal));
-            if (createRoom || roomAction)
-            {
-                var arena = ctx.RequestServices.GetRequiredService<Microsoft.Extensions.Options.IOptions<ArenaOptions>>().Value;
-                int permits = createRoom ? arena.CreatePerMinute : arena.ActionPerMinute;
-                if (permits <= 0)
-                    return RateLimitPartition.GetNoLimiter("off");
-                string ip = ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown";
-                return RateLimitPartition.GetFixedWindowLimiter($"{(createRoom ? "rc" : "ra")}:{ip}", _ => new FixedWindowRateLimiterOptions
-                {
-                    PermitLimit = permits,
-                    Window = rateWindow,
-                    QueueLimit = 0,
-                    AutoReplenishment = true,
-                });
-            }
-        }
-
-        return RateLimitPartition.GetNoLimiter("none");
+            PermitLimit = permits,
+            Window = rateWindow,
+            QueueLimit = 0,
+            AutoReplenishment = true,
+        });
     });
 });
 
@@ -238,9 +253,17 @@ app.Use(async (ctx, next) =>
         headers["X-Frame-Options"] = "DENY";
         headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()";
         string wsOrigin = ctx.Request.IsHttps ? $"wss://{ctx.Request.Host}" : $"ws://{ctx.Request.Host}";
+        string connectSrc = "connect-src 'self' " + wsOrigin;
+        string? connectSrcExtra = app.Configuration["Csp:ConnectSrcExtra"];
+        if (!string.IsNullOrWhiteSpace(connectSrcExtra))
+        {
+            string extra = string.Join(' ', connectSrcExtra.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+            if (extra.Length > 0)
+                connectSrc += " " + extra;
+        }
         headers["Content-Security-Policy"] =
-            "default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self' "
-            + wsOrigin
+            "default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; "
+            + connectSrc
             + "; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
         if (ctx.Request.IsHttps)
             headers["Strict-Transport-Security"] = "max-age=15552000";
@@ -266,6 +289,38 @@ app.Use(async (ctx, next) =>
         var feature = ctx.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpMaxRequestBodySizeFeature>();
         if (feature is { IsReadOnly: false })
             feature.MaxRequestBodySize = MaxContinueBody; // also covers chunked bodies without Content-Length
+    }
+    await next();
+});
+
+// Remember when each limiter partition's current window started, before UseRateLimiter acquires a permit.
+// FixedWindow itself only reports the full window length in Retry-After metadata.
+const int MaxWindowStartEntries = 8192;
+app.Use(async (ctx, next) =>
+{
+    (string Key, int Permits)? partition = ClassifyRateLimit(ctx);
+    if (partition is not null)
+    {
+        DateTime now = DateTime.UtcNow;
+        windowStarts.AddOrUpdate(
+            partition.Value.Key,
+            now,
+            (_, existing) => now - existing >= rateWindow ? now : existing);
+        if (windowStarts.Count > 256)
+        {
+            DateTime cutoff = now - rateWindow;
+            foreach (KeyValuePair<string, DateTime> entry in windowStarts)
+            {
+                if (entry.Value < cutoff)
+                    windowStarts.TryRemove(entry.Key, out _);
+            }
+            // Still over the cap (many distinct keys inside one window): drop oldest extras.
+            if (windowStarts.Count > MaxWindowStartEntries)
+            {
+                foreach (string stale in windowStarts.OrderBy(pair => pair.Value).Select(pair => pair.Key).Take(windowStarts.Count - MaxWindowStartEntries).ToArray())
+                    windowStarts.TryRemove(stale, out _);
+            }
+        }
     }
     await next();
 });
@@ -305,16 +360,57 @@ app.Use(async (ctx, next) =>
     }
 
     // Minimal APIs answer malformed JSON / bad content type with 400 or 415 and an empty body.
-    // Leave any response that already wrote JSON (or anything else) untouched.
+    // Unmatched /api routes and wrong verbs are empty 404 / 405. Leave any response that already
+    // wrote JSON (or anything else) untouched — including a service 404 for an unknown room.
     if (!ctx.Request.Path.StartsWithSegments("/api"))
         return;
-    if (ctx.Response.StatusCode is not (StatusCodes.Status400BadRequest or StatusCodes.Status415UnsupportedMediaType))
+    if (ctx.Response.StatusCode is not (
+        StatusCodes.Status400BadRequest
+        or StatusCodes.Status415UnsupportedMediaType
+        or StatusCodes.Status404NotFound
+        or StatusCodes.Status405MethodNotAllowed))
         return;
     if (ctx.Response.HasStarted
         || ctx.Response.ContentLength is not null
         || !string.IsNullOrEmpty(ctx.Response.ContentType))
         return;
-    await ctx.Response.WriteAsJsonAsync(new ErrorDto("请求格式无效 / Malformed request body."));
+    string emptyBodyError = ctx.Response.StatusCode switch
+    {
+        StatusCodes.Status404NotFound => "接口不存在 / Not found.",
+        StatusCodes.Status405MethodNotAllowed => "不支持的请求方法 / Method not allowed.",
+        _ => "请求格式无效 / Malformed request body.",
+    };
+    await ctx.Response.WriteAsJsonAsync(new ErrorDto(emptyBodyError));
+});
+
+// Browsers send Origin on negotiate and on the WebSocket upgrade. Non-browser clients omit it.
+// Allow same-origin, the CORS allowlist, and local dev origins; anything else is 403.
+// Registered with the other middleware, before any Map* call, so it runs before the hub endpoint.
+app.Use(async (ctx, next) =>
+{
+    string origin = ctx.Request.Headers.Origin.ToString();
+    if (ctx.Request.Path.StartsWithSegments("/hub/game")
+        && !string.IsNullOrWhiteSpace(origin))
+    {
+        bool sameOrigin = false;
+        if (Uri.TryCreate(origin, UriKind.Absolute, out Uri? originUri)
+            && string.Equals(originUri.Scheme, ctx.Request.Scheme, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(originUri.IdnHost, ctx.Request.Host.Host, StringComparison.OrdinalIgnoreCase))
+        {
+            int originPort = originUri.Port;
+            int requestPort = ctx.Request.Host.Port ?? (ctx.Request.IsHttps ? 443 : 80);
+            sameOrigin = originPort == requestPort;
+        }
+
+        if (!sameOrigin && !allowAnyOrigin && !IsAllowlistedOrigin(origin))
+        {
+            ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
+            await ctx.Response.WriteAsJsonAsync(new ErrorDto("来源不被允许 / Origin not allowed."));
+            return;
+        }
+    }
+
+    await next();
 });
 
 app.UseDefaultFiles();
