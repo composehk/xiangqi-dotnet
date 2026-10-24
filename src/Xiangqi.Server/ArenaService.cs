@@ -141,7 +141,7 @@ public sealed class ArenaService : IHostedService
     public CreateRoomResponseDto CreateRoom(CreateRoomRequest? request)
     {
         if (request is null)
-            throw new ApiException(400, "Request body is required.");
+            throw new ApiException(400, "请求体不能为空 / Request body is required.");
 
         SeatKind redKind = ParseKind(request.RedKind, allowOpen: true);
         SeatKind blackKind = ParseKind(request.BlackKind, allowOpen: true);
@@ -155,7 +155,7 @@ public sealed class ArenaService : IHostedService
     public VsAiResponseDto CreateVsAi(VsAiRequest? request)
     {
         if (request is null)
-            throw new ApiException(400, "Request body is required.");
+            throw new ApiException(400, "请求体不能为空 / Request body is required.");
 
         bool humanIsRed = ParseHumanSide(request.HumanColor);
         Difficulty difficulty = ParseDifficulty(request.Difficulty);
@@ -165,7 +165,7 @@ public sealed class ArenaService : IHostedService
         CreateRoomResponseDto created = AddRoom(name, red, black, difficulty, isPublic: false);
         string? token = humanIsRed ? created.Tokens.Red : created.Tokens.Black;
         if (string.IsNullOrEmpty(token))
-            throw new ApiException(500, "Human seat has no token.");
+            throw new ApiException(500, "人类座位没有令牌 / Human seat has no token.");
 
         return new VsAiResponseDto(created.Id, token, created.State);
     }
@@ -217,7 +217,7 @@ public sealed class ArenaService : IHostedService
     public async Task<GameStateDto> PlayAsync(Guid id, MoveRequest? request)
     {
         if (request is null)
-            throw new ApiException(400, "Request body is required.");
+            throw new ApiException(400, "请求体不能为空 / Request body is required.");
 
         Move move;
         try
@@ -226,7 +226,7 @@ public sealed class ArenaService : IHostedService
         }
         catch (FormatException ex)
         {
-            throw new ApiException(400, ex.Message);
+            throw new ApiException(400, "着法格式无效 / invalid move notation: " + ex.Message);
         }
 
         Room room = Require(id);
@@ -237,13 +237,13 @@ public sealed class ArenaService : IHostedService
             Color side = room.Game.SideToMove;
             Seat seat = side == Color.Red ? room.Red : room.Black;
             if (!TokenOwns(seat, request.Token))
-                throw new ApiException(403, "Token does not own the side to move.");
+                throw new ApiException(403, "令牌不属于行棋方 / Token does not own the side to move.");
 
             if (room.Game.Status != GameStatus.Ongoing)
-                throw new ApiException(400, "The game is already over.");
+                throw new ApiException(400, "对局已结束 / The game is already over.");
 
             if (!room.Game.Board.IsLegal(move))
-                throw new ApiException(400, $"Illegal move {move}.");
+                throw new ApiException(400, $"非法着法 {move} / Illegal move {move}.");
 
             room.Game.MakeMove(move);
             room.LastActivity = DateTimeOffset.UtcNow;
@@ -259,7 +259,7 @@ public sealed class ArenaService : IHostedService
     public async Task<JoinResponseDto> JoinAsync(Guid id, JoinRequest? request)
     {
         if (request is null)
-            throw new ApiException(400, "Request body is required.");
+            throw new ApiException(400, "请求体不能为空 / Request body is required.");
 
         Color color = ParseColor(request.Color);
         SeatKind kind = ParseKind(request.Kind, allowOpen: false);
@@ -271,7 +271,7 @@ public sealed class ArenaService : IHostedService
         {
             Seat seat = color == Color.Red ? room.Red : room.Black;
             if (seat.Kind != SeatKind.Open)
-                throw new ApiException(409, "Seat is already taken.");
+                throw new ApiException(409, "座位已被占用 / Seat is already taken.");
 
             seat.Kind = kind;
             seat.Token = NewToken();
@@ -327,7 +327,7 @@ public sealed class ArenaService : IHostedService
             isPublic);
 
         if (!_rooms.TryAdd(room.Id, room))
-            throw new ApiException(500, "Could not create a room.");
+            throw new ApiException(500, "无法创建房间 / Could not create a room.");
 
         GameStateDto state;
         lock (room.Gate)
@@ -454,7 +454,7 @@ public sealed class ArenaService : IHostedService
     {
         if (_rooms.TryGetValue(id, out Room? room))
             return room;
-        throw new ApiException(404, "Room not found.");
+        throw new ApiException(404, "房间不存在 / Room not found.");
     }
 
     private static GameStateDto Project(Room room)
@@ -539,7 +539,7 @@ public sealed class ArenaService : IHostedService
     private static SeatKind ParseKind(string? text, bool allowOpen)
     {
         if (string.IsNullOrWhiteSpace(text))
-            throw new ApiException(400, "Seat kind is required.");
+            throw new ApiException(400, "座位类型不能为空 / Seat kind is required.");
 
         switch (text.Trim().ToLowerInvariant())
         {
@@ -562,8 +562,8 @@ public sealed class ArenaService : IHostedService
         }
 
         throw new ApiException(400, allowOpen
-            ? "Seat kind must be human, ai, bot, or open."
-            : "Seat kind must be human or bot.");
+            ? "座位类型必须是 human、ai、bot 或 open / Seat kind must be human, ai, bot, or open."
+            : "座位类型必须是 human 或 bot / Seat kind must be human or bot.");
     }
 
     private static Difficulty ParseDifficulty(string? text)
@@ -580,7 +580,7 @@ public sealed class ArenaService : IHostedService
             case "hard":
                 return Difficulty.Hard;
             default:
-                throw new ApiException(400, "Difficulty must be easy, medium, or hard.");
+                throw new ApiException(400, "难度必须是 easy、medium 或 hard / Difficulty must be easy, medium, or hard.");
         }
     }
 
@@ -593,7 +593,7 @@ public sealed class ArenaService : IHostedService
             case "black":
                 return false;
             default:
-                throw new ApiException(400, "humanColor must be red or black.");
+                throw new ApiException(400, "humanColor 必须是 red 或 black / humanColor must be red or black.");
         }
     }
 
@@ -606,7 +606,7 @@ public sealed class ArenaService : IHostedService
             case "black":
                 return Color.Black;
             default:
-                throw new ApiException(400, "Color must be red or black.");
+                throw new ApiException(400, "颜色必须是 red 或 black / Color must be red or black.");
         }
     }
 
