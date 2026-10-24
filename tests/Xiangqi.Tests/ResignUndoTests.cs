@@ -150,6 +150,37 @@ public class ResignUndoTests
         Assert.Contains("Nothing to undo", undone.Body.GetProperty("error").GetString(), StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task VsAi_Red_Resign_ThenUndoIsRejected_AndGameStaysOver()
+    {
+        using WebApplicationFactory<Program> factory = Factory();
+        HttpClient client = factory.CreateClient();
+
+        var created = await Send(client, () => client.PostAsJsonAsync("/api/games/vs-ai", new
+        {
+            humanColor = "red",
+            difficulty = "easy"
+        }, Json));
+        Assert.Equal(HttpStatusCode.OK, created.Status);
+        Guid roomId = created.Body.GetProperty("roomId").GetGuid();
+        string token = created.Body.GetProperty("token").GetString()!;
+
+        var resigned = await Send(client, () => client.PostAsJsonAsync($"/api/rooms/{roomId}/resign", new { token }, Json));
+        Assert.Equal(HttpStatusCode.OK, resigned.Status);
+        Assert.NotEqual("ongoing", resigned.Body.GetProperty("status").GetString());
+
+        var undone = await Send(client, () => client.PostAsJsonAsync($"/api/rooms/{roomId}/undo", new { token }, Json));
+        Assert.Equal(HttpStatusCode.BadRequest, undone.Status);
+        Assert.Contains("The game is over", undone.Body.GetProperty("error").GetString(), StringComparison.Ordinal);
+
+        var room = await Send(client, () => client.GetAsync($"/api/rooms/{roomId}"));
+        Assert.Equal(HttpStatusCode.OK, room.Status);
+        Assert.NotEqual("ongoing", room.Body.GetProperty("status").GetString());
+
+        var late = await Send(client, () => client.PostAsJsonAsync($"/api/rooms/{roomId}/moves", new { move = "b2e2", token }, Json));
+        Assert.Equal(HttpStatusCode.BadRequest, late.Status);
+    }
+
     private static WebApplicationFactory<Program> Factory()
     {
         Environment.SetEnvironmentVariable("XIANGQI_TESTING", "1");

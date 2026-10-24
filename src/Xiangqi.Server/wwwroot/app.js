@@ -478,12 +478,12 @@ function updateGameActions() {
   const seated = seatedToAct();
   const ongoing = state.status === "ongoing";
   const aiGame = seated && vsBuiltinAi();
-  row.hidden = !(seated && (ongoing || aiGame));
+  row.hidden = !(seated && ongoing);
   resignBtn.hidden = !ongoing;
   resignBtn.disabled = busy || !seated || !ongoing;
-  undoBtn.hidden = !aiGame;
+  undoBtn.hidden = !aiGame || !ongoing;
   const aiThinking = ongoing && state.sideToMove !== session.color;
-  undoBtn.disabled = busy || !aiGame || aiThinking;
+  undoBtn.disabled = busy || !aiGame || !ongoing || aiThinking;
 }
 
 function clearMoveBookkeeping() {
@@ -516,8 +516,8 @@ async function resignGame() {
 }
 
 async function undoMove() {
-  if (busy || !seatedToAct() || !vsBuiltinAi()) return;
-  if (state.status === "ongoing" && state.sideToMove !== session.color) return;
+  if (busy || !seatedToAct() || !vsBuiltinAi() || state.status !== "ongoing") return;
+  if (state.sideToMove !== session.color) return;
   busy = true;
   render();
   try {

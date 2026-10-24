@@ -263,6 +263,9 @@ public sealed class ArenaService : IHostedService
 
         Color color = ParseColor(request.Color);
         SeatKind kind = ParseKind(request.Kind, allowOpen: false);
+        if (kind == SeatKind.BuiltinAi)
+            throw new ApiException(400, "加入座位只能是 human 或 bot / Joining a seat is only allowed as human or bot.");
+
         Room room = Require(id);
         GameStateDto state;
         long version;
@@ -338,6 +341,9 @@ public sealed class ArenaService : IHostedService
             Seat humanSeat = human == Color.Red ? room.Red : room.Black;
             if (!TokenOwns(humanSeat, request.Token))
                 throw new ApiException(403, "令牌无效 / Invalid token.");
+
+            if (room.Game.Status != GameStatus.Ongoing)
+                throw new ApiException(400, "对局已结束，无法悔棋 / The game is over; undo is not available.");
 
             if (room.AiRunning)
                 throw new ApiException(409, "AI 正在思考，请稍后再试 / The AI is thinking, try again shortly.");
