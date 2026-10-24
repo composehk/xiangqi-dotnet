@@ -30,7 +30,7 @@ public class ApiSmokeTests : IClassFixture<WebApplicationFactory<Program>>
     {
         string html = await _client.GetStringAsync("/");
         Assert.Contains("象棋擂台", html);
-        Assert.Contains("https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/8.0.7/signalr.min.js", html);
+        Assert.Contains("/lib/signalr.min.js", html);
         Assert.Contains("/app.js", html);
 
         string script = await _client.GetStringAsync("/app.js");

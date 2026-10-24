@@ -29,7 +29,9 @@ public class SecurityHeadersTests : IClassFixture<WebApplicationFactory<Program>
 
         string csp = Header(response, "Content-Security-Policy");
         Assert.Contains("frame-ancestors 'none'", csp);
-        Assert.Contains("script-src 'self' https://cdnjs.cloudflare.com", csp);
+        Assert.Contains("script-src 'self';", csp);
+        Assert.DoesNotContain("cdnjs", csp);
+        Assert.DoesNotContain("googleapis", csp);
         Assert.Contains("ws://localhost", csp);
 
         Assert.False(response.Headers.Contains("Strict-Transport-Security"));
