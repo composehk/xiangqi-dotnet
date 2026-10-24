@@ -236,7 +236,7 @@ app.Use(async (ctx, next) =>
         headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()";
         string wsOrigin = ctx.Request.IsHttps ? $"wss://{ctx.Request.Host}" : $"ws://{ctx.Request.Host}";
         headers["Content-Security-Policy"] =
-            "default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' "
+            "default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self' "
             + wsOrigin
             + "; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
         if (ctx.Request.IsHttps)
@@ -268,6 +268,11 @@ app.Use(async (ctx, next) =>
 });
 app.UseRateLimiter();
 app.UseDefaultFiles();
+app.MapGet("/favicon.ico", (HttpContext ctx) =>
+{
+    ctx.Response.Headers.CacheControl = "public, max-age=86400";
+    return Results.File(FaviconIco.Bytes, "image/x-icon");
+}).ExcludeFromDescription();
 app.UseStaticFiles();
 
 var buildInfo = BuildInfo.FromAssembly(typeof(Program).Assembly);

@@ -15,7 +15,7 @@ body {
   margin: 0;
   min-height: 100vh;
   color: var(--ink);
-  font-family: "Noto Serif SC", "Songti SC", "Source Han Serif SC", "STSong", serif;
+  font-family: "Noto Serif SC", "Source Han Serif SC", "Songti SC", "STSong", "SimSun", "Microsoft YaHei", serif;
   background:
     radial-gradient(900px 420px at 0% -10%, rgba(156, 44, 44, 0.28), transparent 55%),
     radial-gradient(700px 380px at 100% 0%, rgba(198, 161, 90, 0.16), transparent 50%),
@@ -98,7 +98,7 @@ main {
 .river { fill: rgba(92, 138, 116, 0.16); }
 .river-text {
   fill: #6a4328;
-  font-family: "Noto Serif SC", "Songti SC", serif;
+  font-family: "Noto Serif SC", "Source Han Serif SC", "Songti SC", "STSong", "SimSun", "Microsoft YaHei", serif;
   font-size: 22px;
   font-weight: 700;
   letter-spacing: 0.4em;
@@ -117,7 +117,7 @@ main {
 .disc.red { stroke: #b42323; }
 .disc.black { stroke: #222; }
 .piece-label {
-  font-family: "Noto Serif SC", "Songti SC", serif;
+  font-family: "Noto Serif SC", "Source Han Serif SC", "Songti SC", "STSong", "SimSun", "Microsoft YaHei", serif;
   font-size: 24px;
   font-weight: 700;
   text-anchor: middle;
