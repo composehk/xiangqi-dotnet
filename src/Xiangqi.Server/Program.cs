@@ -109,7 +109,10 @@ builder.Services.AddRateLimiter(o =>
                 normalized = normalized.TrimEnd('/');
             bool createRoom = normalized is "/api/rooms" or "/api/games/vs-ai";
             bool roomAction = normalized.StartsWith("/api/rooms/", StringComparison.Ordinal)
-                && (normalized.EndsWith("/moves", StringComparison.Ordinal) || normalized.EndsWith("/join", StringComparison.Ordinal));
+                && (normalized.EndsWith("/moves", StringComparison.Ordinal)
+                    || normalized.EndsWith("/join", StringComparison.Ordinal)
+                    || normalized.EndsWith("/resign", StringComparison.Ordinal)
+                    || normalized.EndsWith("/undo", StringComparison.Ordinal));
             if (createRoom || roomAction)
             {
                 var arena = ctx.RequestServices.GetRequiredService<Microsoft.Extensions.Options.IOptions<ArenaOptions>>().Value;
@@ -290,6 +293,12 @@ app.MapPost("/api/rooms/{id:guid}/moves", (Guid id, MoveRequest? request, ArenaS
 
 app.MapPost("/api/rooms/{id:guid}/join", (Guid id, JoinRequest? request, ArenaService arena) =>
     ApiResults.OfAsync(async () => Results.Ok(await arena.JoinAsync(id, request))));
+
+app.MapPost("/api/rooms/{id:guid}/resign", (Guid id, TokenRequest? request, ArenaService arena) =>
+    ApiResults.OfAsync(async () => Results.Ok(await arena.ResignAsync(id, request))));
+
+app.MapPost("/api/rooms/{id:guid}/undo", (Guid id, TokenRequest? request, ArenaService arena) =>
+    ApiResults.OfAsync(async () => Results.Ok(await arena.UndoAsync(id, request))));
 
 app.MapGet("/api/continue/config", (ContinueService svc) => Results.Ok(svc.Config()));
 

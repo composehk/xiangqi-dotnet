@@ -48,7 +48,7 @@ internal sealed class Room
     public string Name { get; }
     public DateTimeOffset CreatedAt { get; }
     public DateTimeOffset LastActivity { get; set; }
-    public Game Game { get; }
+    public Game Game { get; set; }
     public Seat Red { get; }
     public Seat Black { get; }
     public bool IsPublic { get; }
@@ -68,7 +68,7 @@ public sealed class ArenaOptions
     public int SweepIntervalSeconds { get; set; } = 60;
     /// <summary>Per client IP, POST /api/rooms and POST /api/games/vs-ai. 0 or less disables.</summary>
     public int CreatePerMinute { get; set; } = 20;
-    /// <summary>Per client IP, POST /api/rooms/{id}/moves and /join. 0 or less disables.</summary>
+    /// <summary>Per client IP, POST /api/rooms/{id}/moves, /join, /resign, and /undo. 0 or less disables.</summary>
     public int ActionPerMinute { get; set; } = 240;
 }
 
@@ -283,6 +283,96 @@ public sealed class ArenaService : IHostedService
 
         await PublishAsync(room, version);
         return new JoinResponseDto(token, ColorName(color), state);
+    }
+
+    public async Task<GameStateDto> ResignAsync(Guid id, TokenRequest? request)
+    {
+        if (request is null)
+            throw new ApiException(400, "请求体不能为空 / Request body is required.");
+
+        Room room = Require(id);
+        GameStateDto state;
+        long version;
+        lock (room.Gate)
+        {
+            Color? loser = null;
+            if (TokenOwns(room.Red, request.Token))
+                loser = Color.Red;
+            else if (TokenOwns(room.Black, request.Token))
+                loser = Color.Black;
+
+            if (loser is null)
+                throw new ApiException(403, "令牌无效 / Invalid token.");
+
+            if (room.Game.Status != GameStatus.Ongoing)
+                throw new ApiException(400, "对局已结束 / The game is already over.");
+
+            room.Game.Resign(loser.Value);
+            room.LastActivity = DateTimeOffset.UtcNow;
+            version = ++room.Version;
+            state = ProjectLocked(room);
+        }
+
+        await PublishAsync(room, version);
+        return state;
+    }
+
+    public async Task<GameStateDto> UndoAsync(Guid id, TokenRequest? request)
+    {
+        Room room = Require(id);
+        GameStateDto state;
+        long version;
+        lock (room.Gate)
+        {
+            if (request is null)
+                throw new ApiException(400, "请求体不能为空 / Request body is required.");
+
+            bool redHuman = room.Red.Kind == SeatKind.Human;
+            bool blackHuman = room.Black.Kind == SeatKind.Human;
+            bool redAi = room.Red.Kind == SeatKind.BuiltinAi;
+            bool blackAi = room.Black.Kind == SeatKind.BuiltinAi;
+            if (!((redHuman && blackAi) || (blackHuman && redAi)))
+                throw new ApiException(400, "仅人机对局可悔棋 / Undo is only available in games against the AI.");
+
+            Color human = redHuman ? Color.Red : Color.Black;
+            Seat humanSeat = human == Color.Red ? room.Red : room.Black;
+            if (!TokenOwns(humanSeat, request.Token))
+                throw new ApiException(403, "令牌无效 / Invalid token.");
+
+            if (room.AiRunning)
+                throw new ApiException(409, "AI 正在思考，请稍后再试 / The AI is thinking, try again shortly.");
+
+            int h = room.Game.History.Count;
+            if (h == 0)
+                throw new ApiException(400, "没有可悔的着法 / Nothing to undo.");
+
+            // Side to move after k plies is Red when k is even, Black when k is odd.
+            int target = -1;
+            for (int k = h - 1; k >= 0; k--)
+            {
+                Color sideAfter = (k & 1) == 0 ? Color.Red : Color.Black;
+                if (sideAfter == human)
+                {
+                    target = k;
+                    break;
+                }
+            }
+
+            if (target < 0)
+                throw new ApiException(400, "没有可悔的着法 / Nothing to undo.");
+
+            var rebuilt = new Game();
+            for (int i = 0; i < target; i++)
+                rebuilt.MakeMove(room.Game.History[i]);
+
+            room.Game = rebuilt;
+            room.LastActivity = DateTimeOffset.UtcNow;
+            version = ++room.Version;
+            state = ProjectLocked(room);
+        }
+
+        await PublishAsync(room, version);
+        return state;
     }
 
     /// <summary>

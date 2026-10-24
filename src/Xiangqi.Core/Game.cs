@@ -52,6 +52,14 @@ public sealed class Game
         RefreshStatus();
     }
 
+    public void Resign(Color loser)
+    {
+        if (Status != GameStatus.Ongoing)
+            throw new InvalidOperationException("The game is already over.");
+
+        Status = loser == Color.Red ? GameStatus.BlackWins : GameStatus.RedWins;
+    }
+
     private void RecordRepetition()
     {
         ulong hash = _board.Hash;

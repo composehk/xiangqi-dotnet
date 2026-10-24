@@ -12,6 +12,8 @@ public sealed record VsAiRequest(string? HumanColor, string? Difficulty);
 
 public sealed record MoveRequest(string? Move, string? Token);
 
+public sealed record TokenRequest(string? Token);
+
 public sealed record JoinRequest(string? Color, string? Kind);
 
 public sealed record SeatDto(string Kind, bool Occupied, string? Difficulty);
