@@ -52,11 +52,13 @@ let connection = null;
 let joinedRoom = null;
 let pollTimer = null;
 let boardReady = false;
+let flipped = false;
+let clickBound = false;
 let highlightLayer = null;
 let pieceLayer = null;
 
-function xOf(file) { return LEFT + file * CELL; }
-function yOf(rank) { return TOP + (9 - rank) * CELL; }
+function xOf(file) { return LEFT + (flipped ? 8 - file : file) * CELL; }
+function yOf(rank) { return TOP + (flipped ? rank : 9 - rank) * CELL; }
 
 function el(name, attrs) {
   const node = document.createElementNS(NS, name);
@@ -102,7 +104,20 @@ function ensureBoard() {
       hits.appendChild(hit);
     }
   }
-  svg.addEventListener("click", onBoardClick);
+  if (!clickBound) {
+    svg.addEventListener("click", onBoardClick);
+    clickBound = true;
+  }
+}
+
+function syncFlip() {
+  const desired = session.color === "black" && !preview;
+  if (desired === flipped && boardReady) return;
+  flipped = desired;
+  boardReady = false;
+  const svg = document.getElementById("board");
+  svg.replaceChildren();
+  ensureBoard();
 }
 
 function buildDefs() {
@@ -119,19 +134,23 @@ function buildStatic() {
   g.appendChild(el("rect", { x: 0, y: 0, width: WIDTH, height: HEIGHT, class: "board-bg" }));
   const top = yOf(9);
   const bottom = yOf(0);
+  const yMin = Math.min(top, bottom);
+  const yMax = Math.max(top, bottom);
+  const xMin = Math.min(xOf(0), xOf(8));
+  const xMax = Math.max(xOf(0), xOf(8));
   const riverTop = yOf(5);
   const riverBottom = yOf(4);
   g.appendChild(el("rect", {
-    x: xOf(0),
-    y: riverTop,
-    width: CELL * 8,
-    height: riverBottom - riverTop,
+    x: xMin,
+    y: Math.min(riverTop, riverBottom),
+    width: xMax - xMin,
+    height: Math.abs(riverBottom - riverTop),
     class: "river"
   }));
   for (let file = 0; file < 9; file++)
-    g.appendChild(el("line", { x1: xOf(file), y1: top, x2: xOf(file), y2: bottom, class: "grid-line" }));
+    g.appendChild(el("line", { x1: xOf(file), y1: yMin, x2: xOf(file), y2: yMax, class: "grid-line" }));
   for (let rank = 0; rank < 10; rank++)
-    g.appendChild(el("line", { x1: xOf(0), y1: yOf(rank), x2: xOf(8), y2: yOf(rank), class: "grid-line" }));
+    g.appendChild(el("line", { x1: xMin, y1: yOf(rank), x2: xMax, y2: yOf(rank), class: "grid-line" }));
   g.appendChild(el("line", { x1: xOf(3), y1: yOf(0), x2: xOf(5), y2: yOf(2), class: "grid-line" }));
   g.appendChild(el("line", { x1: xOf(5), y1: yOf(0), x2: xOf(3), y2: yOf(2), class: "grid-line" }));
   g.appendChild(el("line", { x1: xOf(3), y1: yOf(9), x2: xOf(5), y2: yOf(7), class: "grid-line" }));
@@ -144,16 +163,16 @@ function buildStatic() {
   for (const spot of stars)
     drawStar(g, spot[0], spot[1]);
   const midY = (yOf(5) + yOf(4)) / 2;
-  g.appendChild(textNode("楚河", (xOf(0) + xOf(4)) / 2, midY, "river-text"));
-  g.appendChild(textNode("汉界", (xOf(4) + xOf(8)) / 2, midY, "river-text"));
+  g.appendChild(textNode(flipped ? "汉界" : "楚河", (xOf(0) + xOf(4)) / 2, midY, "river-text"));
+  g.appendChild(textNode(flipped ? "楚河" : "汉界", (xOf(4) + xOf(8)) / 2, midY, "river-text"));
   for (let file = 0; file < 9; file++)
-    g.appendChild(textNode(String.fromCharCode(97 + file), xOf(file), yOf(0) + 34, "coord"));
+    g.appendChild(textNode(String.fromCharCode(97 + file), xOf(file), yMax + 34, "coord"));
   for (let rank = 0; rank < 10; rank++)
-    g.appendChild(textNode(String(rank), xOf(0) - 32, yOf(rank), "coord"));
+    g.appendChild(textNode(String(rank), xMin - 32, yOf(rank), "coord"));
   g.appendChild(el("rect", {
-    x: xOf(0) - 7,
-    y: yOf(9) - 7,
-    width: CELL * 8 + 14,
+    x: xMin - 7,
+    y: Math.min(yOf(0), yOf(9)) - 7,
+    width: (xMax - xMin) + 14,
     height: CELL * 9 + 14,
     class: "frame"
   }));
@@ -166,8 +185,8 @@ function drawStar(parent, file, rank) {
   const gap = 4;
   const len = 8;
   const sides = [];
-  if (file > 0) sides.push(-1);
-  if (file < 8) sides.push(1);
+  if (x > Math.min(xOf(0), xOf(8))) sides.push(-1);
+  if (x < Math.max(xOf(0), xOf(8))) sides.push(1);
   for (const sx of sides) {
     for (const sy of [-1, 1]) {
       const x0 = x + sx * gap;
@@ -211,6 +230,7 @@ function isOwn(piece) {
 }
 
 function render() {
+  syncFlip();
   ensureBoard();
   document.getElementById("board").classList.toggle("can-move", canMove());
   highlightLayer.replaceChildren();
@@ -277,11 +297,24 @@ function onBoardClick(event) {
 }
 
 function onSquare(file, rank) {
-  if (!canMove() || busy) return;
+  if (busy) return;
+  if (!canMove()) {
+    if (session.token && !preview && state.status === "ongoing") {
+      if (state.sideToMove !== session.color) {
+        setNotice("还没轮到你 · Not your turn", "error");
+        render();
+      } else if (session.cont && session.contStatus !== "active") {
+        setNotice("请先完成支付 · Pay to continue first", "error");
+        render();
+      }
+    }
+    return;
+  }
   const name = squareName(file, rank);
   if (selected) {
     const candidate = selected + name;
     if (legalMoves.indexOf(candidate) >= 0) {
+      notice = null;
       void playMove(candidate);
       return;
     }
@@ -290,13 +323,22 @@ function onSquare(file, rank) {
   const hasMove = legalMoves.some(function (move) { return move.slice(0, 2) === name; });
   if (piece && isOwn(piece) && hasMove) {
     selected = selected === name ? null : name;
+    notice = null;
+    render();
+    return;
+  }
+  if (piece && isOwn(piece)) {
+    setNotice("这个棋子现在无法移动 · This piece cannot move now", "error");
     render();
     return;
   }
   if (selected) {
-    selected = null;
+    setNotice("此着不合法 · Illegal move", "error");
     render();
+    return;
   }
+  setNotice("请先选择己方棋子 · Select one of your pieces first", "error");
+  render();
 }
 
 async function playMove(notation) {
