@@ -1,8 +1,12 @@
 # 象棋擂台 Xiangqi Arena
 
-进程内中国象棋规则、alpha-beta 引擎，以及带棋盘页面的对局服务器。房间保存在内存里，进程退出后清空。
+**▶ 在线演示 Live demo: https://chess.kastop.com**
 
-In-process Xiangqi rules, an alpha-beta engine, and a game server with a board page. Rooms stay in memory and disappear when the process exits.
+![screenshot](docs/screenshot.svg)
+
+进程内中国象棋规则、alpha-beta 引擎，以及带棋盘页面的对局服务器。**免费人机房间保存在内存里，进程退出后清空；付费「断点续弈」会话存于 SQLite，重启后仍在。**
+
+In-process Xiangqi rules, an alpha-beta engine, and a game server with a board page. **Free vs-AI rooms stay in memory and disappear when the process exits; paid 断点续弈 (continue-from-position) sessions are stored in SQLite and survive restarts.**
 
 服务器默认监听 `http://0.0.0.0:5080`。本机浏览或 curl 用 `http://127.0.0.1:5080`。
 
@@ -19,6 +23,72 @@ The server listens on `http://0.0.0.0:5080`. Browse and curl it at `http://127.0
 - 网页棋盘：楚河汉界、九宫斜线、红方 帥仕相傌俥炮兵、黑方 將士象馬車砲卒。点击走子、合法点高亮、上一着高亮、将军与终局提示。可新开人机对局，也可刷新擂台列表后观战。
 - Web board: river (楚河 汉界), palace diagonals, red 帥仕相傌俥炮兵 and black 將士象馬車砲卒. Click to move, legal-move dots, last-move highlight, check and game-over messages. Start a game against the AI, or refresh the lobby and spectate.
 
+## 断点续弈 Continue from a position
+
+导入 FEN 或着法（ICCS 如 `h2e2`，或中文记谱如 `炮二平五`、`前车进一`；红方数字从右往左用中文数字，黑方用阿拉伯数字），在回放里用 ◀ ▶ / 滑块选择断点，选执子与难度后点击「从此续下（1 KAS）」，再与内置 AI 继续对弈。每个续弈会话收取一次 **续弈服务费 1 KAS**（Kaspa）。
+
+Import a FEN or a move list (ICCS like `h2e2`, or Chinese notation like `炮二平五`, `前车进一`; Red counts files right-to-left in Chinese numerals, Black uses digits), pick a breakpoint with ◀ ▶ / the slider, choose side and difficulty, press 「从此续下（1 KAS）」 and play on against the built-in AI. Each session costs one **续弈服务费 (continuation service fee) of 1 KAS** (Kaspa).
+
+官方收款地址 Official pay address (mainnet):
+
+```
+kaspa:qqcp4tea3q82cr9m9t3ctuc633ap89pd80jff5ma5v0a43rfhmw96fpnq6hu2
+```
+
+### 流程 Flow
+
+1. `POST /api/continue/sessions` 创建会话（`pending_auth`），返回要签名的消息 `XiangqiArena:Continue:{sessionId}:{timestamp}` 与会话令牌。Create a session; you get the message to sign and a session token.
+2. 用 KasWare（`requestAccounts` + `signMessage`，Schnorr）签名，或手动粘贴地址与签名，`POST …/auth`。Sign with KasWare or paste address + signature manually.
+3. 支付 1 KAS 到收款地址（KasWare `sendKaspa`，或任意钱包，**须从签名地址发出**），`POST …/payment` 提交 txid。Pay 1 KAS from the signed address and submit the txid.
+4. 服务器验证后会话变为 `active`，`POST …/moves` 走子（支持 ICCS 与中文记谱），AI 同步应着。Once verified the session is `active`; play via `…/moves`.
+
+### 服务器端验证 Server-side verification
+
+- 签名：Kaspa personal message（BLAKE2b-256，key `PersonalMessageSigningHash`）上的 BIP340 Schnorr，公钥取自 `kaspa:` 版本 0 地址的 32 字节负载；时间戳须在 10 分钟内。Kaspa personal-message Schnorr signature, timestamp must be fresh (10 min).
+- 付款：通过 Kaspa REST（默认 `https://api.kaspa.org`）读取交易：`is_accepted`、确认数（默认 ≥ 10）、有输出给 `PayToAddress` 且 ≥ 100000000 sompi、输入来自已签名地址。Payment is read from the Kaspa REST API: accepted, ≥ 10 confirmations, an output of ≥ 1 KAS to the pay-to address, inputs from the signed address.
+- 防重放：txid 全局唯一（SQLite `UNIQUE` + `used_txids`，同事务写入）。Each txid can be used once, ever.
+- 仅支持 Schnorr 地址（`kaspa:q…`）。ECDSA / Tangem 地址不支持。Only Schnorr (`kaspa:q…`) addresses are supported; ECDSA / Tangem are not.
+- 未付费时 `POST …/moves` 返回 **402**；未配置收款地址时 auth/payment 返回 **503**，页面显示「未开放」。Unpaid moves return 402; without a pay-to address, auth/payment return 503 and the UI shows it as unavailable.
+
+### 配置 Configuration
+
+| 键 Key | 默认 Default | 说明 Meaning |
+| --- | --- | --- |
+| `Payment:PayToAddress` | `""` | 收款地址；为空即关闭付费功能。Pay-to address; empty disables the feature. |
+| `Payment:Network` | `mainnet` | `mainnet` 或 `testnet-10`。 |
+| `Payment:ApiBaseUrl` | `https://api.kaspa.org` | Kaspa REST。 |
+| `Payment:PriceSompi` | `100000000` | 1 KAS。 |
+| `Payment:MinConfirmations` | `10` | 最少确认数。Minimum confirmations. |
+| `Payment:TestMode` | `false` | **仅开发**：跳过链上校验。Development only; refuses to start in Production. |
+| `Storage:DbPath` | `App_Data/xiangqi.db` | SQLite 路径。 |
+
+环境变量写法 Env style: `Payment__PayToAddress=kaspa:...`。生产环境建议放在 `appsettings.Production.json`。
+
+### 续弈 API Continue API
+
+| 方法 Method | 路径 Path | 说明 |
+| --- | --- | --- |
+| GET | `/api/continue/config` | 是否开放、收款地址、金额。 |
+| POST | `/api/continue/parse` | `{fen?, moves}` → 起始 FEN、ICCS、中文、每步 FEN。Replay data. |
+| POST | `/api/continue/sessions` | `{fen?, moves?, ply?, difficulty, humanColor}` 创建会话。 |
+| GET | `/api/continue/sessions/{id}` | 会话与局面。 |
+| POST | `/api/continue/sessions/{id}/auth` | `{token, address, signature, timestamp}`。 |
+| POST | `/api/continue/sessions/{id}/payment` | `{token, txid}`；确认数不足返回 202，可稍后重试。 |
+| POST | `/api/continue/sessions/{id}/moves` | `{token, move}`；未付费 402。 |
+
+```bash
+B=https://chess.kastop.com
+curl -s $B/api/continue/sessions -H 'Content-Type: application/json' \
+  -d '{"moves":"炮二平五 马8进7","difficulty":"easy","humanColor":"red"}'
+# -> { "id": "...", "token": "...", "message": "XiangqiArena:Continue:<id>:<ts>", "payToAddress": "kaspa:qqcp…", ... }
+curl -s -o /dev/null -w '%{http_code}\n' $B/api/continue/sessions/<id>/moves \
+  -H 'Content-Type: application/json' -d '{"token":"<token>","move":"h2e2"}'   # 402 until paid
+```
+
+### 未验证项 Not verified against real hardware
+
+签名算法已用 rusty-kaspa 官方测试向量验证；但**尚未用真实 KasWare 签名端到端验证**，也未做过真实 1 KAS 链上支付。The signature code is checked against rusty-kaspa test vectors, but not yet end-to-end with a real KasWare signature or a real 1 KAS payment.
+
 ## 架构 Architecture
 
 ```
@@ -29,7 +99,7 @@ Xiangqi.Server  ArenaService  -------+
     |  ConcurrentDictionary + per-room lock
     |  AI turn -> AlphaBetaEngine (IEngine) on a background task
     v
-Xiangqi.Core   Board, Move, Game
+Xiangqi.Core   Board, Move, Game, ChineseNotation, GameRecord
 Xiangqi.Engine IEngine, AlphaBetaEngine, UciEngine (Pikafish-shaped, not spawned)
 ```
 
@@ -314,6 +384,24 @@ const connection = new signalR.HubConnectionBuilder()
 connection.on("state", (state) => console.log(state.fen, state.sideToMove));
 await connection.start();
 await connection.invoke("JoinRoom", roomId);
+```
+
+## 外部 Bot 示例 / curl walkthrough
+
+C# 控制台示例：`examples/ExternalBot`（用令牌加入座位，仅通过 HTTP 对弈）。
+A C# console example lives in `examples/ExternalBot` (join a seat with a token, play over HTTP only).
+
+```bash
+# 1. 创建房间，黑方留空 Create a room with an open black seat
+curl -s http://127.0.0.1:5080/api/rooms -H 'Content-Type: application/json' \
+  -d '{"redKind":"human","blackKind":"open"}'          # -> id, tokens.red
+# 2. 运行 Bot 加入黑方 Run the bot (joins black)
+dotnet run --project examples/ExternalBot -- http://127.0.0.1:5080 <roomId> black
+# 3. 红方走子 Move for Red with the red token
+curl -s http://127.0.0.1:5080/api/rooms/<roomId>/moves -H 'Content-Type: application/json' \
+  -d '{"move":"h2e2","token":"<red token>"}'
+# 4. 观察局面 Watch the state
+curl -s http://127.0.0.1:5080/api/rooms/<roomId>
 ```
 
 ## IEngine 与 Pikafish 计划 IEngine and Pikafish
