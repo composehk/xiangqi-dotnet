@@ -1,5 +1,7 @@
+using System.Net;
 using System.Text.Json;
 using System.Threading.RateLimiting;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Xiangqi.Server;
 
@@ -37,6 +39,16 @@ builder.Services.AddSignalR();
 builder.Services.AddRateLimiter(o =>
 {
     o.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    o.OnRejected = async (context, ct) =>
+    {
+        int retryAfter = 60;
+        if (context.Lease.TryGetMetadata(MetadataName.RetryAfter, out TimeSpan wait))
+            retryAfter = Math.Clamp((int)Math.Ceiling(wait.TotalSeconds), 1, 3600);
+        context.HttpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+        context.HttpContext.Response.Headers.RetryAfter = retryAfter.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        await context.HttpContext.Response.WriteAsJsonAsync(
+            new ErrorDto($"请求过于频繁，请 {retryAfter} 秒后再试 / too many requests, retry in {retryAfter}s"), ct);
+    };
     o.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(ctx =>
     {
         var limits = ctx.RequestServices.GetRequiredService<Xiangqi.Server.Kaspa.PaymentOptions>();
@@ -90,7 +102,59 @@ builder.Services.AddSingleton<ContinueService>();
 builder.Services.AddSingleton<ArenaService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<ArenaService>());
 
+// Forwarded headers default to none.
+// IIS in-process with direct clients: Connection.RemoteIpAddress is already the real client.
+// Never trust X-Forwarded-For blindly. Honor X-Forwarded-For / X-Forwarded-Proto only when an
+// operator opts in by listing the proxies (Forwarded:KnownProxies) or CIDR ranges
+// (Forwarded:KnownNetworks) that are allowed to overwrite the client address. Anything else
+// leaves the rate-limiter partition on the connection address, so a spoofed XFF cannot mint a new bucket.
+string[]? knownProxies = builder.Configuration.GetSection("Forwarded:KnownProxies").Get<string[]>();
+string[]? knownNetworks = builder.Configuration.GetSection("Forwarded:KnownNetworks").Get<string[]>();
+bool honorForwarded = (knownProxies is { Length: > 0 }) || (knownNetworks is { Length: > 0 });
+if (honorForwarded)
+{
+    builder.Services.Configure<ForwardedHeadersOptions>(options =>
+    {
+        options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+        options.ForwardLimit = 1;
+        // Drop the loopback defaults. An empty allow-list would trust every local proxy, including TestServer.
+        options.KnownProxies.Clear();
+        options.KnownNetworks.Clear();
+        if (knownProxies is not null)
+        {
+            foreach (string raw in knownProxies)
+            {
+                if (!IPAddress.TryParse(raw, out IPAddress? ip))
+                    throw new InvalidOperationException($"Forwarded:KnownProxies entry '{raw}' is not a valid IP address.");
+                options.KnownProxies.Add(ip);
+            }
+        }
+        if (knownNetworks is not null)
+        {
+            foreach (string raw in knownNetworks)
+            {
+                string[] parts = raw.Split('/', 2, StringSplitOptions.TrimEntries);
+                if (parts.Length != 2
+                    || !IPAddress.TryParse(parts[0], out IPAddress? prefix)
+                    || !int.TryParse(parts[1], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out int prefixLength))
+                    throw new InvalidOperationException($"Forwarded:KnownNetworks entry '{raw}' is not a valid CIDR (expected a.b.c.d/prefix).");
+                try
+                {
+                    options.KnownNetworks.Add(new Microsoft.AspNetCore.HttpOverrides.IPNetwork(prefix, prefixLength));
+                }
+                catch (Exception ex) when (ex is not InvalidOperationException)
+                {
+                    throw new InvalidOperationException($"Forwarded:KnownNetworks entry '{raw}' is not a valid CIDR (expected a.b.c.d/prefix).", ex);
+                }
+            }
+        }
+    });
+}
+
 var app = builder.Build();
+
+if (honorForwarded)
+    app.UseForwardedHeaders();
 
 app.UseCors("open");
 
