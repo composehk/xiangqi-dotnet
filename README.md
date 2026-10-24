@@ -136,9 +136,23 @@ dotnet run --project src/Xiangqi.Server
 
 `dotnet run` uses `http://0.0.0.0:5080` from `launchSettings.json`. Running the dll with neither `ASPNETCORE_URLS` nor `ASPNETCORE_HTTP_PORTS` listens on that address too.
 
-页面用 CDN 上的 SignalR 客户端。脚本加载失败时改为每秒轮询 `GET /api/rooms/{id}`。
+## 观战、连接与托管 Spectating, the client, and hosting
 
-The page loads the SignalR client from a CDN. If that script fails, it polls `GET /api/rooms/{id}` once a second.
+人机房间默认是私有的：`isPublic` 为 false，不会出现在 `GET /api/rooms` 擂台列表里。新对局里的「可观战 Allow spectators」复选框默认不勾选；勾选后请求体带 `spectate: true`（`VsAiRequest.Spectate`），房间才会列入擂台，房间名称仍是「人机 · 执红/黑 · 难度」。无论是否公开，`GET /api/rooms/{id}` 都能打开该局，响应里只有人类座位的令牌，不会带出 AI 座位令牌。
+
+Vs-AI rooms are private by default (`isPublic: false`) and are omitted from `GET /api/rooms`. The new-game checkbox 「可观战 / Allow spectators」 is unchecked until the player opts in; the client then sends `spectate: true` (`VsAiRequest.Spectate`) and the room is listed under the same name (`人机 · 执红/黑 · 难度`). `GET /api/rooms/{id}` works either way. The create response includes only the human seat token and never the AI seat token.
+
+网页的 SignalR 客户端和字体都是自托管的：脚本在 `wwwroot/lib/signalr.min.js`，字体是系统字体栈。内容安全策略只允许 `'self'`。脚本加载失败时改为每秒轮询 `GET /api/rooms/{id}`。
+
+The SignalR client and fonts are self-hosted (`wwwroot/lib/signalr.min.js`, the system font stack). Content-Security-Policy is `'self'` only. If that script fails to start a hub connection, the page polls `GET /api/rooms/{id}` once a second.
+
+`runtimeconfig` 使用工作站、非并发 GC（`ServerGarbageCollector=false`，`ConcurrentGarbageCollection=false`），适合小主机。堆上限可用环境变量 `DOTNET_GCHeapHardLimit` 或 `System.GC.HeapHardLimit` 设置，工程本身不写死上限。
+
+The runtimeconfig uses workstation non-concurrent GC (`ServerGarbageCollector=false`, `ConcurrentGarbageCollection=false`) for small hosts. Cap the heap with `DOTNET_GCHeapHardLimit` or `System.GC.HeapHardLimit`; this project does not set a limit itself.
+
+悔棋只在人机对局仍在进行时可用（AI 思考中返回 409，对局结束或没有可退的着法返回 400）。`POST /api/rooms/{id}/join` 只能把空位加入为 `human` 或 `bot`。
+
+Undo is available only while a vs-AI game is ongoing (409 while the AI is thinking, 400 when the game is over or nothing can be undone). Joining a seat via `/join` is only for `human` or `bot`.
 
 ## 测试 Test
 

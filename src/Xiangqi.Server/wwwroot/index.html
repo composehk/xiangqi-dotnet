@@ -16,7 +16,7 @@
         <p>Xiangqi Arena</p>
       </div>
     </div>
-    <span id="conn" class="conn">未连接 Offline</span>
+    <span id="conn" class="conn">待机 Idle</span>
   </header>
   <main>
     <section class="board-card">
@@ -40,6 +40,7 @@
             <option value="hard">困难 Hard</option>
           </select>
         </label>
+        <label class="check"><input type="checkbox" id="spectateOpt" /> 可观战 Allow spectators</label>
         <button id="newGame" type="submit">新对局 New Game</button>
       </form>
       <div id="gameActions" class="controls actions" hidden>
