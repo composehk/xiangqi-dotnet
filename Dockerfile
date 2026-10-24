@@ -5,7 +5,8 @@ COPY src/Xiangqi.Engine/Xiangqi.Engine.csproj src/Xiangqi.Engine/
 COPY src/Xiangqi.Server/Xiangqi.Server.csproj src/Xiangqi.Server/
 RUN dotnet restore src/Xiangqi.Server/Xiangqi.Server.csproj
 COPY src/ src/
-RUN dotnet publish src/Xiangqi.Server/Xiangqi.Server.csproj -c Release -o /app/publish --no-restore
+ARG GIT_SHA=unknown
+RUN dotnet publish src/Xiangqi.Server/Xiangqi.Server.csproj -c Release -o /app/publish --no-restore -p:SourceRevisionId=$GIT_SHA
 
 FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS final
 WORKDIR /app
