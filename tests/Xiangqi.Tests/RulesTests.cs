@@ -7,7 +7,7 @@ public class RulesTests
     [Fact]
     public void FlyingGeneralIsCheckAndPinsTheInterposingPiece()
     {
-        var facing = Board.FromFen("4k4/9/9/9/9/9/9/9/9/4K4 w - - 0 1");
+        var facing = Board.FromFenUnchecked("4k4/9/9/9/9/9/9/9/9/4K4 w - - 0 1");
         Assert.True(facing.IsInCheck(Color.Red));
         Assert.True(facing.IsInCheck(Color.Black));
 
@@ -15,7 +15,7 @@ public class RulesTests
         Assert.Equal(new[] { "e0d0", "e0f0" }, kingMoves);
         Assert.DoesNotContain("e0e1", kingMoves);
 
-        var blocked = Board.FromFen("4k4/9/9/9/9/4R4/9/9/9/4K4 w - - 0 1");
+        var blocked = Board.FromFenUnchecked("4k4/9/9/9/9/4R4/9/9/9/4K4 w - - 0 1");
         Assert.False(blocked.IsInCheck());
         List<string> chariot = MovesFrom(blocked, "e4");
         Assert.Contains("e4e5", chariot);
@@ -56,7 +56,7 @@ public class RulesTests
     [Fact]
     public void HorseCannotJumpABlockedLeg()
     {
-        var blocked = Board.FromFen("3k5/9/9/9/9/9/9/9/1p7/1N2K4 w - - 0 1");
+        var blocked = Board.FromFen("3k5/9/9/9/9/9/9/9/1n7/1N2K4 w - - 0 1");
         List<string> moves = MovesFrom(blocked, "b0");
         Assert.Contains("b0d1", moves);
         Assert.DoesNotContain("b0a2", moves);
@@ -72,7 +72,7 @@ public class RulesTests
     [Fact]
     public void ElephantIsBlockedByItsEyeAndCannotCrossTheRiver()
     {
-        var board = Board.FromFen("3k5/9/9/9/9/2B6/3p5/9/9/4K4 w - - 0 1");
+        var board = Board.FromFen("3k5/9/9/9/9/2B6/3n5/9/9/4K4 w - - 0 1");
         List<string> moves = MovesFrom(board, "c4");
         Assert.Contains("c4a2", moves);
         Assert.DoesNotContain("c4e2", moves);

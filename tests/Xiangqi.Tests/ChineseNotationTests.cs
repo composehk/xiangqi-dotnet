@@ -49,7 +49,7 @@ public class ChineseNotationTests
     public void FrontAndBackForBlack()
     {
         // Black cannons on file b at ranks 7 and 5; black's "front" is the lower rank.
-        var board = Board.FromFen("4k4/9/1c7/9/1c7/9/9/9/9/4K4 b - - 0 1");
+        var board = Board.FromFen("3k5/9/1c7/9/1c7/9/9/9/9/4K4 b - - 0 1");
         Assert.Equal("前炮平5", ChineseNotation.Format(board, Move.Parse("b5e5")));
         Assert.Equal("后炮平5", ChineseNotation.Format(board, Move.Parse("b7e7")));
         Assert.Equal("b5e5", ChineseNotation.Parse(board, "前炮平5").ToString());

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Text;
 
@@ -45,13 +46,18 @@ public sealed partial class Board
     {
     }
 
-    public static Board FromFen(string fen)
+    public static Board FromFen(string fen) => FromFen(fen, validate: true);
+
+    /// <summary>Skips legality validation (test fixtures with synthetic positions only; never used for user input).</summary>
+    internal static Board FromFenUnchecked(string fen) => FromFen(fen, validate: false);
+
+    private static Board FromFen(string fen, bool validate)
     {
         if (string.IsNullOrWhiteSpace(fen))
             throw new ArgumentException("FEN is empty.", nameof(fen));
 
         var board = new Board();
-        board.ParseFen(fen.Trim());
+        board.ParseFen(fen.Trim(), validate);
         board.RecomputeHash();
         board.AssertInvariants();
         return board;
@@ -338,7 +344,7 @@ public sealed partial class Board
         return total;
     }
 
-    private void ParseFen(string fen)
+    private void ParseFen(string fen, bool validate)
     {
         string[] parts = fen.Split(' ', StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length == 0)
@@ -391,10 +397,114 @@ public sealed partial class Board
             _ => throw new FormatException($"Unknown side to move '{parts[1]}'.")
         };
 
-        _halfmoveClock = parts.Length > 4 ? int.Parse(parts[4]) : 0;
-        _fullmoveNumber = parts.Length > 5 ? int.Parse(parts[5]) : 1;
-        if (_halfmoveClock < 0 || _fullmoveNumber < 1)
+        _halfmoveClock = 0;
+        _fullmoveNumber = 1;
+        if (parts.Length > 4 && !TryParseClock(parts[4], out _halfmoveClock))
+            throw new FormatException("Half-move clock is invalid.");
+        if (parts.Length > 5 && !TryParseClock(parts[5], out _fullmoveNumber))
+            throw new FormatException("Full-move number is invalid.");
+
+        if (validate)
+            ValidatePosition();
+    }
+
+    private static bool TryParseClock(string text, out int value)
+        => int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out value);
+
+    /// <summary>
+    /// Rejects positions that are illegal even if every rank parsed. Always runs, including Release.
+    /// </summary>
+    private void ValidatePosition()
+    {
+        int redGenerals = 0;
+        int blackGenerals = 0;
+        var counts = new int[2, 8];
+        _redKing = -1;
+        _blackKing = -1;
+
+        for (int square = 0; square < SquareCount; square++)
+        {
+            Piece piece = _squares[square];
+            if (piece == Piece.None)
+                continue;
+
+            int file = square % FileCount;
+            int rank = square / FileCount;
+            bool red = piece.GetColor() == Color.Red;
+            PieceType type = piece.GetPieceType();
+            counts[red ? 0 : 1, (int)type]++;
+
+            switch (type)
+            {
+                case PieceType.General:
+                    if (red)
+                    {
+                        redGenerals++;
+                        _redKing = square;
+                    }
+                    else
+                    {
+                        blackGenerals++;
+                        _blackKing = square;
+                    }
+
+                    if (file < 3 || file > 5 || (red ? rank > 2 : rank < 7))
+                        throw new FormatException("A general is outside its palace.");
+                    break;
+                case PieceType.Advisor:
+                    if (!IsAdvisorPoint(file, rank, red))
+                        throw new FormatException("An advisor is outside the palace diagonals.");
+                    break;
+                case PieceType.Elephant:
+                    if (!IsElephantPoint(file, rank, red))
+                        throw new FormatException("An elephant is off its legal points.");
+                    break;
+                case PieceType.Soldier:
+                    if (red)
+                    {
+                        if (rank < 3 || (rank <= 4 && (file & 1) != 0))
+                            throw new FormatException("A red soldier is on an illegal square.");
+                    }
+                    else if (rank > 6 || (rank >= 5 && (file & 1) != 0))
+                    {
+                        throw new FormatException("A black soldier is on an illegal square.");
+                    }
+
+                    break;
+            }
+        }
+
+        if (redGenerals != 1 || blackGenerals != 1)
+            throw new FormatException("Each side must have exactly one general.");
+
+        if (counts[0, (int)PieceType.Advisor] > 2 || counts[1, (int)PieceType.Advisor] > 2
+            || counts[0, (int)PieceType.Elephant] > 2 || counts[1, (int)PieceType.Elephant] > 2
+            || counts[0, (int)PieceType.Horse] > 2 || counts[1, (int)PieceType.Horse] > 2
+            || counts[0, (int)PieceType.Chariot] > 2 || counts[1, (int)PieceType.Chariot] > 2
+            || counts[0, (int)PieceType.Cannon] > 2 || counts[1, (int)PieceType.Cannon] > 2
+            || counts[0, (int)PieceType.Soldier] > 5 || counts[1, (int)PieceType.Soldier] > 5)
+            throw new FormatException("A side has more pieces than the legal maximum.");
+
+        if (KingsFace())
+            throw new FormatException("The generals face each other on an open file.");
+
+        if (IsInCheck(_sideToMove.Opposite()))
+            throw new FormatException("The side not to move is in check.");
+
+        if ((uint)_halfmoveClock > 2000 || _fullmoveNumber < 1 || _fullmoveNumber > 100000)
             throw new FormatException("Move clocks in the FEN are invalid.");
+    }
+
+    private static bool IsAdvisorPoint(int file, int rank, bool red)
+    {
+        int palaceRank = red ? rank : 9 - rank;
+        return (file, palaceRank) is (3, 0) or (5, 0) or (4, 1) or (3, 2) or (5, 2);
+    }
+
+    private static bool IsElephantPoint(int file, int rank, bool red)
+    {
+        int sideRank = red ? rank : 9 - rank;
+        return (file, sideRank) is (2, 0) or (6, 0) or (0, 2) or (4, 2) or (8, 2) or (2, 4) or (6, 4);
     }
 
     private void RecomputeHash()
