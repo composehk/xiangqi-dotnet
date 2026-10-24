@@ -405,6 +405,7 @@ function syncSetupFromState() {
   const ai = red && red.kind === "ai" ? red : black && black.kind === "ai" ? black : null;
   if (diffEl && ai && ai.difficulty) diffEl.value = ai.difficulty;
   if (!colorEl) return;
+  // Tokenless spectators stay on "red": this dropdown is the human color for the next new game, not the viewed seat.
   if (!session.token)
     colorEl.value = "red";
   else if (session.color === "red" || session.color === "black")
@@ -734,14 +735,17 @@ async function spectate(roomId) {
   selected = null;
   seenPly = -1;
   notice = null;
-  const response = await fetch("/api/rooms/" + roomId);
-  if (!response.ok) {
+  const response = await fetch("/api/rooms/" + encodeURIComponent(roomId) + "?quiet=1");
+  let data = null;
+  try { data = await response.json(); }
+  catch { data = null; }
+  if (!response.ok || !data || data.gone === true) {
     setNotice("房间不存在。 Room not found.", "error");
     render();
     return;
   }
   preview = false;
-  await applyState(await response.json());
+  await applyState(data);
   syncSetupFromState();
   await watchRoom(roomId);
   await syncRoom(roomId);
@@ -750,8 +754,17 @@ async function spectate(roomId) {
 
 async function syncRoom(roomId) {
   if (session.roomId !== roomId) return;
-  const response = await fetch("/api/rooms/" + roomId);
-  if (response.ok) await applyState(await response.json());
+  const response = await fetch("/api/rooms/" + encodeURIComponent(roomId) + "?quiet=1");
+  let data = null;
+  try { data = await response.json(); }
+  catch { data = null; }
+  if (!response.ok || !data || data.gone === true) {
+    stopPoll();
+    setNotice("房间已结束或已被清理。 Room ended or was cleaned up.", "info");
+    render();
+    return;
+  }
+  await applyState(data);
 }
 
 function setConn(mode) {
@@ -866,14 +879,30 @@ async function restore() {
   try { saved = JSON.parse(sessionStorage.getItem(SESSION_KEY) || "null"); }
   catch { saved = null; }
   if (!saved || !saved.roomId) return;
-  const response = await fetch("/api/rooms/" + saved.roomId);
+  function dropSavedQuietly() {
+    try { sessionStorage.removeItem(SESSION_KEY); }
+    catch { /* ignore */ }
+    session = { roomId: null, token: null, color: null, spectating: false };
+    setConn("idle");
+  }
+  const response = await fetch("/api/rooms/" + encodeURIComponent(saved.roomId) + "?quiet=1");
   if (!response.ok) {
-    sessionStorage.removeItem(SESSION_KEY);
+    dropSavedQuietly();
+    return;
+  }
+  let data = null;
+  try { data = await response.json(); }
+  catch {
+    dropSavedQuietly();
+    return;
+  }
+  if (data && data.gone === true) {
+    dropSavedQuietly();
     return;
   }
   session = saved;
   preview = false;
-  await applyState(await response.json());
+  await applyState(data);
   syncSetupFromState();
   await watchRoom(saved.roomId);
 }

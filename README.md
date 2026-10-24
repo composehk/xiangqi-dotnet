@@ -401,6 +401,10 @@ Rate-limited calls return `429` with `Retry-After` and a bilingual JSON error. `
 
 Lobby: a finished room leaves `GET /api/rooms` 30 seconds after it ends (`Arena:FinishedLobbyGraceSeconds`, default 30); `GET /api/rooms/{id}` still works. While spectating, the page shows a "离开观战 Leave spectating" button. Optional `Csp:ConnectSrcExtra` (space separated) appends sources to the CSP `connect-src`, which is otherwise derived from the request host.
 
+`GET /api/rooms/{id}?quiet=1`：房间不存在时返回 200 `{"gone":true,...}` 而不是 404（页面刷新恢复旧会话时用，避免控制台红色 404）；不带 `quiet` 行为不变。生产环境请把 `AllowedHosts` 设为实际域名（例如 `chess.kastop.com;localhost`），开发默认为 `*`。响应带 `Vary: Host`，CSP 的 `connect-src` 只在 Host 合法且不超过 255 字符时才包含 ws/wss 来源。
+
+`GET /api/rooms/{id}?quiet=1` returns 200 `{"gone":true,...}` instead of 404 when the room is missing (used when a reload restores an old session, so the console shows no red 404); without `quiet` nothing changes. In production set `AllowedHosts` to the real host name(s) (for example `chess.kastop.com;localhost`); the development default is `*`. Responses carry `Vary: Host`, and the CSP `connect-src` only includes a ws/wss origin when the Host is well-formed and at most 255 characters.
+
 ## 外部 Bot 协议 External bot protocol
 
 1. 创建带 `bot` 座位的房间，或对空位 `POST /join`，`kind` 为 `bot`。保存返回的令牌，它只代表那一方。

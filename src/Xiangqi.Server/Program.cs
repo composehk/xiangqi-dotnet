@@ -252,8 +252,15 @@ app.Use(async (ctx, next) =>
         headers["Referrer-Policy"] = "no-referrer";
         headers["X-Frame-Options"] = "DENY";
         headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()";
-        string wsOrigin = ctx.Request.IsHttps ? $"wss://{ctx.Request.Host}" : $"ws://{ctx.Request.Host}";
-        string connectSrc = "connect-src 'self' " + wsOrigin;
+        // CSP connect-src includes the request Host; caches must vary on it.
+        headers.AppendCommaSeparatedValues("Vary", "Host");
+        string connectSrc = "connect-src 'self'";
+        string? hostValue = ctx.Request.Host.Value;
+        if (IsSafeCspHost(hostValue))
+        {
+            string wsOrigin = ctx.Request.IsHttps ? $"wss://{hostValue}" : $"ws://{hostValue}";
+            connectSrc += " " + wsOrigin;
+        }
         string? connectSrcExtra = app.Configuration["Csp:ConnectSrcExtra"];
         if (!string.IsNullOrWhiteSpace(connectSrcExtra))
         {
@@ -427,8 +434,27 @@ app.MapGet("/api/health", () => Results.Ok(new HealthDto("ok", buildInfo.Version
 app.MapGet("/api/rooms", (ArenaService arena) =>
     ApiResults.Of(() => Results.Ok(arena.List())));
 
-app.MapGet("/api/rooms/{id:guid}", (Guid id, ArenaService arena) =>
-    ApiResults.Of(() => Results.Ok(arena.Get(id))));
+app.MapGet("/api/rooms/{id:guid}", (Guid id, ArenaService arena, string? quiet) =>
+    ApiResults.Of(() =>
+    {
+        bool isQuiet = string.Equals(quiet, "1", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(quiet, "true", StringComparison.OrdinalIgnoreCase);
+        try
+        {
+            var room = arena.Get(id);
+            if (room is null)
+            {
+                if (isQuiet)
+                    return Results.Json(new { gone = true, error = "房间不存在 / Room not found." });
+                return Results.Json(new ErrorDto("房间不存在 / Room not found."), statusCode: StatusCodes.Status404NotFound);
+            }
+            return Results.Ok(room);
+        }
+        catch (ApiException ex) when (isQuiet && ex.Status == StatusCodes.Status404NotFound)
+        {
+            return Results.Json(new { gone = true, error = ex.Message });
+        }
+    }));
 
 app.MapGet("/api/rooms/{id:guid}/moves", (Guid id, ArenaService arena) =>
     ApiResults.Of(() => Results.Ok(arena.LegalMoves(id))));
@@ -484,6 +510,20 @@ app.Lifetime.ApplicationStarted.Register(() =>
 });
 
 app.Run();
+
+static bool IsSafeCspHost(string? host)
+{
+    if (string.IsNullOrEmpty(host) || host.Length > 255)
+        return false;
+    foreach (char c in host)
+    {
+        if (c is (>= 'A' and <= 'Z') or (>= 'a' and <= 'z') or (>= '0' and <= '9')
+            or '.' or '-' or ':' or '[' or ']')
+            continue;
+        return false;
+    }
+    return true;
+}
 
 public partial class Program
 {
