@@ -26,6 +26,9 @@ public sealed class ContinueSession
     public long UpdatedAt { get; set; }
 }
 
+/// <summary>Outcome of an atomic txid consume. <see cref="SessionNotPayable"/> means the txid was not recorded.</summary>
+public enum ConsumeResult { Ok, TxidUsed, SessionNotPayable }
+
 /// <summary>SQLite persistence for continue sessions, payments and used txids.</summary>
 public sealed class ContinueStore
 {
@@ -123,10 +126,42 @@ public sealed class ContinueStore
     }
 
     /// <summary>
-    /// Atomically marks <paramref name="txid"/> as used by <paramref name="sessionId"/> (anti-replay),
-    /// records the payment and activates the session. Returns false if the txid was already used.
+    /// Compare-and-set authorize: pending_auth/pending_payment → pending_payment.
+    /// Returns false when the session was already activated or finished (0 rows).
+    /// </summary>
+    public bool TryAuthorize(ContinueSession s)
+    {
+        lock (_gate)
+        {
+            using var c = Open();
+            using var cmd = c.CreateCommand();
+            cmd.CommandText = """
+                UPDATE continue_sessions SET ts=$ts, address=$addr, signature=$sig, status='pending_payment', updated_at=$updated
+                WHERE id=$id AND status IN ('pending_auth','pending_payment')
+                """;
+            cmd.Parameters.AddWithValue("$ts", s.Timestamp);
+            cmd.Parameters.AddWithValue("$addr", (object?)s.Address ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$sig", (object?)s.Signature ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$updated", s.UpdatedAt);
+            cmd.Parameters.AddWithValue("$id", s.Id);
+            return cmd.ExecuteNonQuery() == 1;
+        }
+    }
+
+    /// <summary>
+    /// Atomically marks <paramref name="txid"/> as used, records the payment and activates the session.
+    /// The session row updates only when <c>status='pending_payment'</c>; otherwise the transaction rolls back
+    /// (txid not burned) and this returns false. False also means the txid was already used.
     /// </summary>
     public bool TryConsumeTxid(ContinueSession s, string txid, long amountSompi, long confirmations)
+        => TryConsumeTxid(s, txid, amountSompi, confirmations, requirePendingPayment: true) == ConsumeResult.Ok;
+
+    /// <summary>
+    /// Compare-and-set consume. <paramref name="requirePendingPayment"/> selects
+    /// <c>WHERE id=$s AND status='pending_payment'</c> (true) or <c>WHERE id=$s</c> (false).
+    /// Zero updated rows rolls back the txid insert. Callers that need the failure reason use this overload.
+    /// </summary>
+    public ConsumeResult TryConsumeTxid(ContinueSession s, string txid, long amountSompi, long confirmations, bool requirePendingPayment)
     {
         lock (_gate)
         {
@@ -142,7 +177,7 @@ public sealed class ContinueStore
                 if (ins.ExecuteNonQuery() == 0)
                 {
                     tx.Rollback();
-                    return false;
+                    return ConsumeResult.TxidUsed;
                 }
             }
             using (var pay = c.CreateCommand())
@@ -160,14 +195,33 @@ public sealed class ContinueStore
             using (var upd = c.CreateCommand())
             {
                 upd.Transaction = tx;
-                upd.CommandText = "UPDATE continue_sessions SET txid=$t, status='active', updated_at=$now WHERE id=$s";
+                upd.CommandText = requirePendingPayment
+                    ? "UPDATE continue_sessions SET txid=$t, status='active', updated_at=$now WHERE id=$s AND status='pending_payment'"
+                    : "UPDATE continue_sessions SET txid=$t, status='active', updated_at=$now WHERE id=$s";
                 upd.Parameters.AddWithValue("$t", txid);
                 upd.Parameters.AddWithValue("$s", s.Id);
                 upd.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToUnixTimeSeconds());
-                upd.ExecuteNonQuery();
+                if (upd.ExecuteNonQuery() == 0)
+                {
+                    tx.Rollback();
+                    return ConsumeResult.SessionNotPayable;
+                }
             }
             tx.Commit();
-            return true;
+            return ConsumeResult.Ok;
+        }
+    }
+
+    /// <summary>Session that already consumed <paramref name="txid"/>, or null.</summary>
+    public string? GetTxidSession(string txid)
+    {
+        lock (_gate)
+        {
+            using var c = Open();
+            using var cmd = c.CreateCommand();
+            cmd.CommandText = "SELECT session_id FROM used_txids WHERE txid=$t";
+            cmd.Parameters.AddWithValue("$t", txid);
+            return cmd.ExecuteScalar() as string;
         }
     }
 

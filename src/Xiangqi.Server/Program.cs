@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Threading.RateLimiting;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Xiangqi.Server;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -30,11 +32,42 @@ builder.Services.AddCors(options =>
 
 builder.Services.AddSignalR();
 
+// Rate limiting for the paid-continue API: per client IP, fixed one-minute window.
+// (POST only; reads and the free vs-AI mode are not limited here.)
+builder.Services.AddRateLimiter(o =>
+{
+    o.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    o.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(ctx =>
+    {
+        var limits = ctx.RequestServices.GetRequiredService<Xiangqi.Server.Kaspa.PaymentOptions>();
+        var path = ctx.Request.Path;
+        if (!HttpMethods.IsPost(ctx.Request.Method) || !path.StartsWithSegments("/api/continue"))
+            return RateLimitPartition.GetNoLimiter("none");
+        bool create = path.Value is "/api/continue/sessions" or "/api/continue/sessions/";
+        int permits = create ? limits.CreatePerMinute : limits.ActionPerMinute;
+        if (permits <= 0)
+            return RateLimitPartition.GetNoLimiter("off");
+        string ip = ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+        return RateLimitPartition.GetFixedWindowLimiter($"{(create ? "c" : "a")}:{ip}", _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = permits,
+            Window = TimeSpan.FromMinutes(1),
+            QueueLimit = 0,
+            AutoReplenishment = true,
+        });
+    });
+});
+
 // 断点续弈 (paid continue-from-position) — payment + persistence.
 var paymentOptions = new Xiangqi.Server.Kaspa.PaymentOptions();
 builder.Configuration.GetSection("Payment").Bind(paymentOptions);
-if (paymentOptions.TestMode && builder.Environment.IsProduction())
-    throw new InvalidOperationException("Payment:TestMode must never be enabled in Production.");
+// TestMode accepts ANY txid as paid. Only Development or the automated test host may enable it;
+// every other environment name (Production, Staging, unset, typos) refuses to start.
+if (paymentOptions.TestMode && !builder.Environment.IsDevelopment() && string.IsNullOrWhiteSpace(testing))
+    throw new InvalidOperationException("Payment:TestMode is only allowed in Development / automated tests.");
+if (!paymentOptions.TestMode && paymentOptions.IsConfigured
+    && !(Uri.TryCreate(paymentOptions.ApiBaseUrl, UriKind.Absolute, out var apiUri) && apiUri.Scheme == Uri.UriSchemeHttps))
+    throw new InvalidOperationException("Payment:ApiBaseUrl must be an https URL.");
 builder.Services.AddSingleton(paymentOptions);
 string dbPath = builder.Configuration["Storage:DbPath"] is { Length: > 0 } configuredDb
     ? configuredDb
@@ -48,7 +81,11 @@ if (paymentOptions.TestMode)
     builder.Services.AddSingleton<Xiangqi.Server.Kaspa.IPaymentVerifier, TestModePaymentVerifier>();
 else
     builder.Services.AddHttpClient<Xiangqi.Server.Kaspa.IPaymentVerifier, Xiangqi.Server.Kaspa.KaspaPaymentVerifier>(c =>
-        c.Timeout = TimeSpan.FromSeconds(15));
+    {
+        c.Timeout = TimeSpan.FromSeconds(15);
+        c.MaxResponseContentBufferSize = 1 << 20; // a Kaspa tx lookup is a few KB; never buffer more than 1 MiB
+    });
+builder.Services.TryAddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<ContinueService>();
 builder.Services.AddSingleton<ArenaService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<ArenaService>());
@@ -56,6 +93,26 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<ArenaService>());
 var app = builder.Build();
 
 app.UseCors("open");
+
+// Request-size cap for the paid-continue API (a record + moves fits in a few KB).
+const long MaxContinueBody = 64 * 1024;
+app.Use(async (ctx, next) =>
+{
+    if (ctx.Request.Path.StartsWithSegments("/api/continue") && !HttpMethods.IsGet(ctx.Request.Method))
+    {
+        if (ctx.Request.ContentLength > MaxContinueBody)
+        {
+            ctx.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
+            await ctx.Response.WriteAsJsonAsync(new ErrorDto("请求体过大 / request body too large"));
+            return;
+        }
+        var feature = ctx.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpMaxRequestBodySizeFeature>();
+        if (feature is { IsReadOnly: false })
+            feature.MaxRequestBodySize = MaxContinueBody; // also covers chunked bodies without Content-Length
+    }
+    await next();
+});
+app.UseRateLimiter();
 app.UseDefaultFiles();
 app.UseStaticFiles();
 

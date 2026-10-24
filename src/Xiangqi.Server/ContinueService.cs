@@ -33,15 +33,30 @@ public sealed record ContinueSessionDto(
 public sealed class ContinueService
 {
     public const string FeeLabel = "续弈服务费";
+
+    // Input size limits (all checked before any parsing / DB / network work).
+    public const int MaxFenLength = 120;
+    public const int MaxMovesLength = 20_000;
+    public const int MaxAddressLength = 100;
+    public const int MaxSignatureLength = 256;
+    public const int MaxTokenLength = 64;
+    public const int MaxTxidLength = 80;
+    public const int MaxMoveLength = 64;
+    public const int MaxOptionLength = 16;
+
     private readonly ContinueStore _store;
     private readonly IPaymentVerifier _verifier;
     private readonly PaymentOptions _options;
     private readonly IEngine _engine = new AlphaBetaEngine();
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _locks = new();
+    private readonly ConcurrentDictionary<string, long> _lastLookup = new();
     private readonly ILogger<ContinueService> _logger;
+    private readonly TimeProvider _time;
 
-    public ContinueService(ContinueStore store, IPaymentVerifier verifier, PaymentOptions options, ILogger<ContinueService> logger)
+    public ContinueService(ContinueStore store, IPaymentVerifier verifier, PaymentOptions options, ILogger<ContinueService> logger,
+        TimeProvider? time = null)
     {
+        _time = time ?? TimeProvider.System;
         _store = store;
         _verifier = verifier;
         _options = options;
@@ -56,6 +71,8 @@ public sealed class ContinueService
 
     public static ParseRecordResponse ParseRecord(ParseRecordRequest? request)
     {
+        Limit(request?.Fen, MaxFenLength, "fen");
+        Limit(request?.Moves, MaxMovesLength, "moves");
         string fen = string.IsNullOrWhiteSpace(request?.Fen) ? Board.StartFen : request!.Fen!.Trim();
         try
         {
@@ -73,6 +90,9 @@ public sealed class ContinueService
 
     public ContinueSessionDto Create(CreateContinueRequest? request)
     {
+        RequireConfigured(); // no pay-to address (or Payment disabled) => the paid entry is closed: 503, nothing is stored
+        Limit(request?.Difficulty, MaxOptionLength, "difficulty");
+        Limit(request?.HumanColor, MaxOptionLength, "humanColor");
         var parsed = ParseRecord(new ParseRecordRequest(request?.Fen, request?.Moves));
         int ply = request?.Ply ?? parsed.Iccs.Length;
         if (ply < 0 || ply > parsed.Iccs.Length)
@@ -91,7 +111,7 @@ public sealed class ContinueService
         if (color is not ("red" or "black"))
             throw new ApiException(400, "humanColor must be red or black.");
 
-        long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        long now = _time.GetUtcNow().ToUnixTimeSeconds();
         var s = new ContinueSession
         {
             Id = Guid.NewGuid().ToString("N"),
@@ -117,12 +137,32 @@ public sealed class ContinueService
     public ContinueSessionDto Authorize(string id, ContinueAuthRequest? request)
     {
         RequireConfigured();
+        Limit(request?.Token, MaxTokenLength, "token");
+        Limit(request?.Address, MaxAddressLength, "address");
+        Limit(request?.Signature, MaxSignatureLength, "signature");
+        var s0 = Load(id);
+        var gate = _locks.GetOrAdd(s0.Id, _ => new SemaphoreSlim(1, 1));
+        // Same per-session lock as payment/moves: a late re-sign must not overwrite a just-activated session.
+        gate.Wait();
+        try
+        {
+            return AuthorizeLocked(id, request);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    private ContinueSessionDto AuthorizeLocked(string id, ContinueAuthRequest? request)
+    {
         var s = Load(id);
         RequireToken(s, request?.Token);
         if (s.Status != "pending_auth" && s.Status != "pending_payment")
             throw new ApiException(409, "会话已激活或已结束 / session already activated");
+        RequireNotExpired(s);
         long ts = request?.Timestamp ?? 0;
-        long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        long now = _time.GetUtcNow().ToUnixTimeSeconds();
         if (ts <= 0 || Math.Abs(now - ts) > _options.SignatureMaxAgeSeconds || ts < s.CreatedAt - 60)
             throw new ApiException(400, "签名时间戳已过期，请重新签名 / timestamp outside freshness window");
         string message = SignMessage(s.Id, ts);
@@ -134,14 +174,18 @@ public sealed class ContinueService
         s.Timestamp = ts;
         s.Status = "pending_payment";
         s.UpdatedAt = now;
-        _store.Update(s);
+        if (!_store.TryAuthorize(s))
+            throw new ApiException(409, "会话已激活或已结束 / session already activated");
         return Project(s);
     }
 
     public async Task<(int Status, ContinueSessionDto Session)> SubmitPaymentAsync(string id, ContinuePaymentRequest? request, CancellationToken ct)
     {
         RequireConfigured();
-        var gate = _locks.GetOrAdd(id, _ => new SemaphoreSlim(1, 1));
+        Limit(request?.Token, MaxTokenLength, "token");
+        Limit(request?.Txid, MaxTxidLength, "txid");
+        var known = Load(id); // 404 for unknown ids BEFORE a lock is allocated (bounded lock table)
+        var gate = _locks.GetOrAdd(known.Id, _ => new SemaphoreSlim(1, 1));
         await gate.WaitAsync(ct);
         try
         {
@@ -151,19 +195,37 @@ public sealed class ContinueService
                 return (200, Project(s));
             if (s.Status != "pending_payment" || string.IsNullOrEmpty(s.Address))
                 throw new ApiException(409, "请先完成钱包签名 / sign with your wallet first");
+            RequireNotExpired(s);
             string txid = (request?.Txid ?? "").Trim().ToLowerInvariant();
             if (!KaspaPaymentVerifier.IsTxid(txid))
                 throw new ApiException(400, "txid 格式无效（64 位十六进制） / invalid txid");
-            if (_store.IsTxidUsed(txid))
+            // Same txid + this session is a lost-response retry, not a conflict.
+            string? bound = _store.GetTxidSession(txid);
+            if (bound == s.Id)
+                return (200, Project(Load(id)));
+            if (bound != null)
                 throw new ApiException(409, "该交易已被使用 / txid already used");
+
+            // Throttle upstream lookups per session (the UI polls every 5 s).
+            long nowTicks = Environment.TickCount64;
+            if (_lastLookup.TryGetValue(s.Id, out long last) && nowTicks - last < _options.PaymentMinIntervalSeconds * 1000L)
+                throw new ApiException(429, "请求过于频繁，请稍后再试 / too many payment checks, slow down");
+            _lastLookup[s.Id] = nowTicks;
 
             var result = await _verifier.VerifyAsync(txid, s.Address, ct);
             if (result.Pending)
                 return (202, Project(s, info: result.Error));
             if (!result.Ok)
                 throw new ApiException(400, result.Error ?? "支付验证失败");
-            if (!_store.TryConsumeTxid(s, txid, result.AmountSompi, result.Confirmations))
+            var consumed = _store.TryConsumeTxid(s, txid, result.AmountSompi, result.Confirmations, requirePendingPayment: true);
+            if (consumed == ConsumeResult.SessionNotPayable)
+                throw new ApiException(409, "会话不可支付 / session is not payable");
+            if (consumed == ConsumeResult.TxidUsed)
+            {
+                if (_store.GetTxidSession(txid) == s.Id)
+                    return (200, Project(Load(id)));
                 throw new ApiException(409, "该交易已被使用 / txid already used");
+            }
             _logger.LogInformation("Continue session {Id} activated by tx {Txid}", s.Id, txid);
             s = Load(id);
             await AiReplyAsync(s, ct);
@@ -177,7 +239,10 @@ public sealed class ContinueService
 
     public async Task<ContinueSessionDto> PlayAsync(string id, ContinueMoveRequest? request, CancellationToken ct)
     {
-        var gate = _locks.GetOrAdd(id, _ => new SemaphoreSlim(1, 1));
+        Limit(request?.Token, MaxTokenLength, "token");
+        Limit(request?.Move, MaxMoveLength, "move");
+        var known = Load(id);
+        var gate = _locks.GetOrAdd(known.Id, _ => new SemaphoreSlim(1, 1));
         await gate.WaitAsync(ct);
         try
         {
@@ -231,7 +296,7 @@ public sealed class ContinueService
         s.Result = StatusName(game.Status);
         if (game.Status != GameStatus.Ongoing)
             s.Status = "finished";
-        s.UpdatedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        s.UpdatedAt = _time.GetUtcNow().ToUnixTimeSeconds();
         _store.Update(s);
     }
 
@@ -244,7 +309,27 @@ public sealed class ContinueService
     }
 
     private ContinueSession Load(string id) =>
-        _store.Get(id) ?? throw new ApiException(404, "Session not found.");
+        (IsSessionId(id) ? _store.Get(id) : null) ?? throw new ApiException(404, "Session not found.");
+
+    /// <summary>Session ids are Guid "N" strings: exactly 32 lowercase hex characters.</summary>
+    public static bool IsSessionId(string? id) =>
+        id is { Length: 32 } && id.All(c => c is (>= '0' and <= '9') or (>= 'a' and <= 'f'));
+
+    private static void Limit(string? value, int max, string name)
+    {
+        if (value is not null && value.Length > max)
+            throw new ApiException(413, $"{name} 过长（最多 {max} 字符） / {name} too long (max {max})");
+    }
+
+    private bool IsExpired(ContinueSession s) =>
+        s.Status is "pending_auth" or "pending_payment"
+        && _time.GetUtcNow().ToUnixTimeSeconds() - s.CreatedAt > _options.SessionTtlMinutes * 60L;
+
+    private void RequireNotExpired(ContinueSession s)
+    {
+        if (IsExpired(s))
+            throw new ApiException(410, "会话已过期，请重新创建 / session expired, create a new one");
+    }
 
     private void RequireConfigured()
     {
@@ -271,7 +356,7 @@ public sealed class ContinueService
             GameRecord.ToChinese(s.StartFen, history).ToArray(),
             humanTurn ? game.Board.GenerateLegalMoves().Select(m => m.ToString()).ToArray() : Array.Empty<string>());
         return new ContinueSessionDto(
-            s.Id, s.Status, SignMessage(s.Id, s.Timestamp), s.Timestamp, s.Nonce,
+            s.Id, IsExpired(s) ? "expired" : s.Status, SignMessage(s.Id, s.Timestamp), s.Timestamp, s.Nonce,
             _options.IsConfigured ? _options.PayToAddress : null, _options.PriceSompi, _options.Network, _options.MinConfirmations,
             s.Address, s.Txid, s.Ply, s.StartFen, s.HumanColor, s.Difficulty, includeToken ? s.Token : null, info, state);
     }
